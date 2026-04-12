@@ -1,0 +1,142 @@
+use logos::Logos;
+
+#[derive(Logos, Debug, PartialEq, Clone)]
+#[logos(skip r"[ \t\f]+")]
+pub enum RawToken {
+    #[token("def")]
+    Def,
+    #[token("return")]
+    Return,
+    #[token("if")]
+    If,
+    #[token("else")]
+    Else,
+    #[token("elif")]
+    Elif,
+    #[token("while")]
+    While,
+    #[token("True")]
+    True,
+    #[token("False")]
+    False,
+    #[token("None")]
+    None,
+
+    #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
+    Identifier(String),
+
+    #[regex("[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
+    Integer(i64),
+
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| {
+        let s = lex.slice();
+        s[1..s.len()-1].to_string()
+    })]
+    String(String),
+
+    #[token("=")]
+    Assign,
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Multiply,
+    #[token("/")]
+    Divide,
+    #[token("==")]
+    Equal,
+    #[token("!=")]
+    NotEqual,
+    #[token("<")]
+    Less,
+    #[token(">")]
+    Greater,
+    #[token("<=")]
+    LessEqual,
+    #[token(">=")]
+    GreaterEqual,
+
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
+    #[token(":")]
+    Colon,
+    #[token(",")]
+    Comma,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Token {
+    Raw(RawToken),
+    Indent,
+    Dedent,
+    Newline,
+    Eof,
+}
+
+pub struct Lexer {
+    tokens: Vec<Token>,
+    cursor: usize,
+}
+
+impl Lexer {
+    pub fn new(input: &str) -> Self {
+        let mut tokens = Vec::new();
+        let mut indent_stack = vec![0];
+
+        for line in input.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let indent = line.len() - trimmed.len();
+            let current_indent = *indent_stack.last().unwrap();
+
+            if indent > current_indent {
+                indent_stack.push(indent);
+                tokens.push(Token::Indent);
+            } else if indent < current_indent {
+                while indent < *indent_stack.last().unwrap() {
+                    indent_stack.pop();
+                    tokens.push(Token::Dedent);
+                }
+                // Check for inconsistent indentation (optional)
+            }
+
+            let lex = RawToken::lexer(trimmed);
+            for raw in lex.flatten() {
+                tokens.push(Token::Raw(raw));
+            }
+            tokens.push(Token::Newline);
+        }
+
+        while indent_stack.len() > 1 {
+            indent_stack.pop();
+            tokens.push(Token::Dedent);
+        }
+        tokens.push(Token::Eof);
+
+        Self { tokens, cursor: 0 }
+    }
+
+    pub fn next(&mut self) -> Token {
+        if self.cursor < self.tokens.len() {
+            let t = self.tokens[self.cursor].clone();
+            self.cursor += 1;
+            t
+        } else {
+            Token::Eof
+        }
+    }
+
+    pub fn peek(&self) -> Token {
+        if self.cursor < self.tokens.len() {
+            self.tokens[self.cursor].clone()
+        } else {
+            Token::Eof
+        }
+    }
+}

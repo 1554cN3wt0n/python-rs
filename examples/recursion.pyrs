@@ -1,0 +1,15 @@
+# Factorial
+def factorial(n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+print("Factorial of 5 is", factorial(5))
+
+# Fibonacci
+def fib(n):
+    if n <= 1:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+print("Fibonacci(7) is", fib(7))

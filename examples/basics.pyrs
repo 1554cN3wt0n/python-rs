@@ -1,0 +1,20 @@
+# Basic arithmetic and assignments
+a = 10
+b = 20
+c = a + b * 2
+print("10 + 20 * 2 =", c)
+
+# String operations
+name = "PyRS"
+greeting = "Hello " + name
+print(greeting)
+
+# Booleans
+is_rust = True
+is_python = False
+print("Is it Rust?", is_rust)
+print("Is it Python?", is_python)
+
+# None type
+empty = None
+print("Empty value:", empty)

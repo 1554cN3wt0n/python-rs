@@ -1,0 +1,19 @@
+# If-else statements
+x = 42
+
+if x > 50:
+    print(x, "is greater than 50")
+else:
+    if x == 42:
+        print("The answer is", x)
+    else:
+        print(x, "is small")
+
+# Truthiness
+if 1:
+    print("1 is truthy")
+
+if "":
+    print("This won't print")
+else:
+    print("Empty string is falsy")

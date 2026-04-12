@@ -1,0 +1,21 @@
+# Function definitions
+def greet(name):
+    print("Hello,", name)
+
+greet("World")
+
+# Functions with return values
+def add(a, b):
+    return a + b
+
+sum = add(10, 5)
+print("10 + 5 =", sum)
+
+# Functions calling other functions
+def square(x):
+    return x * x
+
+def sum_squares(a, b):
+    return square(a) + square(b)
+
+print("3^2 + 4^2 =", sum_squares(3, 4))
