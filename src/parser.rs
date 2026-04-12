@@ -30,18 +30,16 @@ impl Parser {
             Token::Raw(RawToken::Def) => Ok(Some(self.parse_function_def()?)),
             Token::Raw(RawToken::If) => Ok(Some(self.parse_if_statement()?)),
             Token::Raw(RawToken::While) => Ok(Some(self.parse_while_statement()?)),
+            Token::Raw(RawToken::For) => Ok(Some(self.parse_for_statement()?)),
+            Token::Raw(RawToken::Class) => Ok(Some(self.parse_class_def()?)),
             Token::Raw(RawToken::Return) => Ok(Some(self.parse_return_statement()?)),
             _ => {
                 let expr = self.parse_expression()?;
                 if let Token::Raw(RawToken::Assign) = self.lexer.peek() {
                     self.lexer.next();
-                    if let Expr::Variable(name) = expr {
-                        let value = self.parse_expression()?;
-                        self.consume_newline()?;
-                        Ok(Some(Stmt::Assignment(name, value)))
-                    } else {
-                        Err(anyhow!("Invalid assignment target"))
-                    }
+                    let value = self.parse_expression()?;
+                    self.consume_newline()?;
+                    Ok(Some(Stmt::Assignment(expr, value)))
                 } else {
                     self.consume_newline()?;
                     Ok(Some(Stmt::Expression(expr)))
@@ -80,6 +78,22 @@ impl Parser {
         Ok(Stmt::FunctionDef { name, params, body })
     }
 
+    fn parse_class_def(&mut self) -> Result<Stmt> {
+        self.lexer.next(); // consume 'class'
+        let name = match self.lexer.next() {
+            Token::Raw(RawToken::Identifier(id)) => id,
+            _ => return Err(anyhow!("Expected class name")),
+        };
+
+        self.expect(Token::Raw(RawToken::Colon))?;
+        self.consume_newline()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::ClassDef {
+            name,
+            methods: body,
+        })
+    }
+
     fn parse_if_statement(&mut self) -> Result<Stmt> {
         self.lexer.next(); // consume 'if'
         let condition = self.parse_expression()?;
@@ -114,6 +128,24 @@ impl Parser {
         Ok(Stmt::While { condition, body })
     }
 
+    fn parse_for_statement(&mut self) -> Result<Stmt> {
+        self.lexer.next(); // consume 'for'
+        let target = match self.lexer.next() {
+            Token::Raw(RawToken::Identifier(id)) => id,
+            _ => return Err(anyhow!("Expected identifier after 'for'")),
+        };
+        self.expect(Token::Raw(RawToken::In))?;
+        let iterable = self.parse_expression()?;
+        self.expect(Token::Raw(RawToken::Colon))?;
+        self.consume_newline()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::For {
+            target,
+            iterable,
+            body,
+        })
+    }
+
     fn parse_return_statement(&mut self) -> Result<Stmt> {
         self.lexer.next(); // consume 'return'
         if self.lexer.peek() == Token::Newline || self.lexer.peek() == Token::Eof {
@@ -139,7 +171,37 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expr> {
-        self.parse_equality()
+        self.parse_logical_or()
+    }
+
+    fn parse_logical_or(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_logical_and()?;
+        while self.lexer.peek() == Token::Raw(RawToken::Or) {
+            self.lexer.next();
+            let right = self.parse_logical_and()?;
+            expr = Expr::Logical(Box::new(expr), LogicalOp::Or, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_logical_and(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_logical_not()?;
+        while self.lexer.peek() == Token::Raw(RawToken::And) {
+            self.lexer.next();
+            let right = self.parse_logical_not()?;
+            expr = Expr::Logical(Box::new(expr), LogicalOp::And, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_logical_not(&mut self) -> Result<Expr> {
+        if self.lexer.peek() == Token::Raw(RawToken::Not) {
+            self.lexer.next();
+            let expr = self.parse_logical_not()?;
+            Ok(Expr::Unary(LogicalOp::Not, Box::new(expr)))
+        } else {
+            self.parse_equality()
+        }
     }
 
     fn parse_equality(&mut self) -> Result<Expr> {
@@ -199,7 +261,7 @@ impl Parser {
     }
 
     fn parse_factor(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_primary()?;
+        let mut expr = self.parse_postfix()?;
         while matches!(
             self.lexer.peek(),
             Token::Raw(RawToken::Multiply) | Token::Raw(RawToken::Divide)
@@ -209,22 +271,18 @@ impl Parser {
                 Token::Raw(RawToken::Divide) => BinaryOp::Div,
                 _ => unreachable!(),
             };
-            let right = self.parse_primary()?;
+            let right = self.parse_postfix()?;
             expr = Expr::Binary(Box::new(expr), op, Box::new(right));
         }
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<Expr> {
-        match self.lexer.next() {
-            Token::Raw(RawToken::True) => Ok(Expr::Literal(Literal::Bool(true))),
-            Token::Raw(RawToken::False) => Ok(Expr::Literal(Literal::Bool(false))),
-            Token::Raw(RawToken::None) => Ok(Expr::Literal(Literal::None)),
-            Token::Raw(RawToken::Integer(n)) => Ok(Expr::Literal(Literal::Int(n))),
-            Token::Raw(RawToken::String(s)) => Ok(Expr::Literal(Literal::String(s))),
-            Token::Raw(RawToken::Identifier(id)) => {
-                if self.lexer.peek() == Token::Raw(RawToken::LParen) {
-                    self.lexer.next(); // consume (
+    fn parse_postfix(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            match self.lexer.peek() {
+                Token::Raw(RawToken::LParen) => {
+                    self.lexer.next();
                     let mut args = Vec::new();
                     if self.lexer.peek() != Token::Raw(RawToken::RParen) {
                         loop {
@@ -237,11 +295,70 @@ impl Parser {
                         }
                     }
                     self.expect(Token::Raw(RawToken::RParen))?;
-                    Ok(Expr::Call(id, args))
-                } else {
-                    Ok(Expr::Variable(id))
+                    expr = Expr::Call(Box::new(expr), args);
                 }
+                Token::Raw(RawToken::LBracket) => {
+                    self.lexer.next();
+                    let index = self.parse_expression()?;
+                    self.expect(Token::Raw(RawToken::RBracket))?;
+                    expr = Expr::Subscript(Box::new(expr), Box::new(index));
+                }
+                Token::Raw(RawToken::Dot) => {
+                    self.lexer.next();
+                    match self.lexer.next() {
+                        Token::Raw(RawToken::Identifier(id)) => {
+                            expr = Expr::Attribute(Box::new(expr), id);
+                        }
+                        _ => return Err(anyhow!("Expected identifier after '.'")),
+                    }
+                }
+                _ => break,
             }
+        }
+        Ok(expr)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr> {
+        match self.lexer.next() {
+            Token::Raw(RawToken::True) => Ok(Expr::Literal(Literal::Bool(true))),
+            Token::Raw(RawToken::False) => Ok(Expr::Literal(Literal::Bool(false))),
+            Token::Raw(RawToken::None) => Ok(Expr::Literal(Literal::None)),
+            Token::Raw(RawToken::Integer(n)) => Ok(Expr::Literal(Literal::Int(n))),
+            Token::Raw(RawToken::String(s)) => Ok(Expr::Literal(Literal::String(s))),
+            Token::Raw(RawToken::LBracket) => {
+                let mut items = Vec::new();
+                if self.lexer.peek() != Token::Raw(RawToken::RBracket) {
+                    loop {
+                        items.push(self.parse_expression()?);
+                        if self.lexer.peek() == Token::Raw(RawToken::Comma) {
+                            self.lexer.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Token::Raw(RawToken::RBracket))?;
+                Ok(Expr::List(items))
+            }
+            Token::Raw(RawToken::LBrace) => {
+                let mut items = Vec::new();
+                if self.lexer.peek() != Token::Raw(RawToken::RBrace) {
+                    loop {
+                        let key = self.parse_expression()?;
+                        self.expect(Token::Raw(RawToken::Colon))?;
+                        let val = self.parse_expression()?;
+                        items.push((key, val));
+                        if self.lexer.peek() == Token::Raw(RawToken::Comma) {
+                            self.lexer.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Token::Raw(RawToken::RBrace))?;
+                Ok(Expr::Dict(items))
+            }
+            Token::Raw(RawToken::Identifier(id)) => Ok(Expr::Variable(id)),
             Token::Raw(RawToken::LParen) => {
                 let expr = self.parse_expression()?;
                 self.expect(Token::Raw(RawToken::RParen))?;

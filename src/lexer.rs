@@ -21,6 +21,18 @@ pub enum RawToken {
     False,
     #[token("None")]
     None,
+    #[token("and")]
+    And,
+    #[token("or")]
+    Or,
+    #[token("not")]
+    Not,
+    #[token("for")]
+    For,
+    #[token("in")]
+    In,
+    #[token("class")]
+    Class,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
@@ -65,6 +77,16 @@ pub enum RawToken {
     Colon,
     #[token(",")]
     Comma,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+    #[token(".")]
+    Dot,
 }
 
 #[derive(Debug, PartialEq, Clone)]

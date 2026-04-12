@@ -1,0 +1,46 @@
+# Testing Lists
+print("--- Lists ---")
+my_list = [1, 2, 3]
+print(my_list)
+my_list[1] = 20
+print(my_list)
+print("Length of list:", len(my_list))
+
+# Testing Dictionaries
+print("--- Dictionaries ---")
+my_dict = {"a": 1, "b": 2}
+print(my_dict)
+my_dict["c"] = 3
+print(my_dict)
+print("Value of 'a':", my_dict["a"])
+
+# Testing Logical Operators
+print("--- Logical Operators ---")
+print(True and False)
+print(True or False)
+print(not True)
+print(1 < 2 and 3 > 2)
+
+# Testing For Loops and Range
+print("--- For Loops & Range ---")
+for i in range(3):
+    print(i)
+
+my_list = ["apple", "banana", "cherry"]
+for fruit in my_list:
+    print(fruit)
+
+# Testing Classes
+print("--- Classes ---")
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def show(self):
+        print("Point x:", self.x)
+        print("Point y:", self.y)
+
+p = Point(10, 20)
+print(p.x)
+p.show()

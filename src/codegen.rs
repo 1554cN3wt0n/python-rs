@@ -32,10 +32,14 @@ impl Codegen {
                 self.gen_expr(expr);
                 self.builder.push_op(WasmOp::Drop);
             }
-            Stmt::Assignment(name, expr) => {
+            Stmt::Assignment(target, expr) => {
                 self.gen_expr(expr);
-                let local_idx = self.get_or_create_local(name);
-                self.builder.push_op(WasmOp::LocalSet(local_idx));
+                if let Expr::Variable(name) = target {
+                    let local_idx = self.get_or_create_local(name);
+                    self.builder.push_op(WasmOp::LocalSet(local_idx));
+                } else {
+                    todo!("Non-variable assignment target in codegen");
+                }
             }
             Stmt::If {
                 condition,
