@@ -52,10 +52,22 @@ impl Parser {
 
     fn parse_import_statement(&mut self) -> Result<Stmt> {
         self.lexer.next(); // consume 'import'
-        let name = match self.lexer.next() {
+        let mut name = match self.lexer.next() {
             Token::Raw(RawToken::Identifier(id)) => id,
             _ => return Err(anyhow!("Expected identifier after 'import'")),
         };
+
+        while self.lexer.peek() == Token::Raw(RawToken::Dot) {
+            self.lexer.next();
+            match self.lexer.next() {
+                Token::Raw(RawToken::Identifier(id)) => {
+                    name.push('.');
+                    name.push_str(&id);
+                }
+                _ => return Err(anyhow!("Expected identifier after '.'")),
+            }
+        }
+
         self.consume_newline()?;
         Ok(Stmt::Import(name))
     }

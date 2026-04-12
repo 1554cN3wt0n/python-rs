@@ -26,7 +26,7 @@ pub enum PyObject {
     Type(String),
     Module {
         name: String,
-        env: Rc<RefCell<HashMap<String, PyObject>>>,
+        env: Rc<RefCell<crate::env::Environment>>,
     },
     Slice {
         start: Option<Box<PyObject>>,

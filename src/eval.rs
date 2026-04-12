@@ -7,12 +7,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct Evaluator {
-    global_env: Rc<RefCell<Environment>>,
+    pub global_env: Rc<RefCell<Environment>>,
+    load_paths: Rc<RefCell<Vec<String>>>,
 }
 
 impl Evaluator {
     pub fn new() -> Self {
         let global_env = Rc::new(RefCell::new(Environment::new()));
+        let load_paths = Rc::new(RefCell::new(vec![".".to_string()]));
 
         // Register built-ins
         global_env.borrow_mut().define(
@@ -131,32 +133,38 @@ impl Evaluator {
         );
 
         // File I/O
+        let open_load_paths = load_paths.clone();
         global_env.borrow_mut().define(
             "open".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(move |args| {
                 if args.is_empty() {
                     return PyObject::None;
                 }
                 let filename = args[0].to_string();
+                let inner_load_paths = open_load_paths.clone();
 
                 let mut attributes = HashMap::new();
-                let f_name = filename.clone();
+                let f_name_read = filename.clone();
 
                 attributes.insert(
                     "read".to_string(),
                     PyObject::BuiltinFunction(Rc::new(move |_| {
-                        std::fs::read_to_string(&f_name)
-                            .map(PyObject::String)
-                            .unwrap_or(PyObject::None)
+                        for path in inner_load_paths.borrow().iter() {
+                            let p = std::path::Path::new(path).join(&f_name_read);
+                            if let Ok(content) = std::fs::read_to_string(p) {
+                                return PyObject::String(content);
+                            }
+                        }
+                        PyObject::None
                     })),
                 );
 
-                let f_name2 = filename.clone();
+                let f_name_write = filename.clone();
                 attributes.insert(
                     "write".to_string(),
                     PyObject::BuiltinFunction(Rc::new(move |f_args| {
                         if let Some(PyObject::String(content)) = f_args.first() {
-                            std::fs::write(&f_name2, content).ok();
+                            std::fs::write(&f_name_write, content).ok();
                         }
                         PyObject::None
                     })),
@@ -169,7 +177,14 @@ impl Evaluator {
             })),
         );
 
-        Self { global_env }
+        Self {
+            global_env,
+            load_paths,
+        }
+    }
+
+    pub fn add_load_path(&self, path: String) {
+        self.load_paths.borrow_mut().push(path);
     }
 
     pub fn eval(&mut self, statements: &[Stmt]) -> Result<PyObject> {
@@ -333,22 +348,68 @@ impl Evaluator {
                 Ok(Some(val))
             }
             Stmt::Import(name) => {
-                let filename = format!("{}.pyrs", name);
-                let content = std::fs::read_to_string(&filename)
-                    .map_err(|e| anyhow!("Could not import module '{}': {}", name, e))?;
+                let parts: Vec<&str> = name.split('.').collect();
+                let rel_path = name.replace('.', "/");
+                let filename = format!("{}.pyrs", rel_path);
+
+                let mut content = None;
+                for path in self.load_paths.borrow().iter() {
+                    let p = std::path::Path::new(path).join(&filename);
+                    if let Ok(c) = std::fs::read_to_string(p) {
+                        content = Some(c);
+                        break;
+                    }
+                }
+
+                let content =
+                    content.ok_or_else(|| anyhow!("Could not import module '{}'", name))?;
 
                 let lexer = crate::lexer::Lexer::new(&content);
                 let mut parser = crate::parser::Parser::new(lexer);
                 let statements = parser.parse()?;
 
                 let mut module_evaluator = Evaluator::new();
+                *module_evaluator.load_paths.borrow_mut() = self.load_paths.borrow().clone();
                 module_evaluator.eval(&statements)?;
 
                 let module = PyObject::Module {
-                    name: name.clone(),
-                    env: Rc::new(RefCell::new(module_evaluator.global_env.borrow().values())),
+                    name: parts.last().unwrap().to_string(),
+                    env: module_evaluator.global_env.clone(),
                 };
-                env.borrow_mut().define(name.clone(), module);
+
+                // Handle nested naming: import a.b -> root env gets 'a', 'a' gets 'b'
+                let mut current_scope = env.clone();
+                for (i, part) in parts.iter().enumerate() {
+                    if i == parts.len() - 1 {
+                        current_scope
+                            .borrow_mut()
+                            .define(part.to_string(), module.clone());
+                    } else {
+                        let sub_module = {
+                            let maybe_sub = current_scope.borrow().get(part);
+                            match maybe_sub {
+                                Some(PyObject::Module { name, env }) => PyObject::Module {
+                                    name: name.clone(),
+                                    env: env.clone(),
+                                },
+                                _ => {
+                                    let m = PyObject::Module {
+                                        name: part.to_string(),
+                                        env: Rc::new(RefCell::new(Environment::new())),
+                                    };
+                                    current_scope
+                                        .borrow_mut()
+                                        .define(part.to_string(), m.clone());
+                                    m
+                                }
+                            }
+                        };
+
+                        if let PyObject::Module { env: sub_env, .. } = sub_module {
+                            current_scope = sub_env;
+                        }
+                    }
+                }
                 Ok(None)
             }
             Stmt::Try { body, handlers } => {

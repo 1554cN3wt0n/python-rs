@@ -1,0 +1,6 @@
+# Testing Hierarchical Imports
+
+print("--- Nested Imports ---")
+import utils.math_mod
+print("Nested PI from utils.math_mod:", utils.math_mod.PI)
+print("Nested add from utils.math_mod:", utils.math_mod.add(1, 2))

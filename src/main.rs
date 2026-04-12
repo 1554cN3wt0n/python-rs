@@ -29,6 +29,12 @@ fn main() -> Result<()> {
 }
 
 fn run_file(path: &str, evaluator: &mut Evaluator) -> Result<()> {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && let Some(s) = parent.to_str()
+        && !s.is_empty()
+    {
+        evaluator.add_load_path(s.to_string());
+    }
     let source =
         fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path))?;
     execute(&source, evaluator)
