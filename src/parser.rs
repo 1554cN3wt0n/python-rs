@@ -460,6 +460,7 @@ impl Parser {
             Token::Raw(RawToken::None) => Ok(Expr::Literal(Literal::None)),
             Token::Raw(RawToken::Integer(n)) => Ok(Expr::Literal(Literal::Int(n))),
             Token::Raw(RawToken::String(s)) => Ok(Expr::Literal(Literal::String(s))),
+            Token::Raw(RawToken::FString(s)) => self.parse_fstring(s),
             Token::Raw(RawToken::LBracket) => {
                 if self.lexer.peek() == Token::Raw(RawToken::RBracket) {
                     self.lexer.next();
@@ -571,5 +572,39 @@ impl Parser {
             Token::Dedent => Ok(()), // Dedent often implies end of line
             t => Err(anyhow!("Expected newline or Eof, found {:?}", t)),
         }
+    }
+
+    fn parse_fstring(&mut self, content: String) -> Result<Expr> {
+        let mut parts = Vec::new();
+        let mut start = 0;
+
+        while start < content.len() {
+            if let Some(brace_start) = content[start..].find('{') {
+                let brace_start = start + brace_start;
+                if brace_start > start {
+                    parts.push(FStringPart::Literal(
+                        content[start..brace_start].to_string(),
+                    ));
+                }
+
+                if let Some(brace_end) = content[brace_start..].find('}') {
+                    let brace_end = brace_start + brace_end;
+                    let expr_str = &content[brace_start + 1..brace_end];
+
+                    let inner_lexer = crate::lexer::Lexer::new(expr_str);
+                    let mut inner_parser = Parser::new(inner_lexer);
+                    let expr = inner_parser.parse_expression()?;
+
+                    parts.push(FStringPart::Expression(expr));
+                    start = brace_end + 1;
+                } else {
+                    return Err(anyhow!("Unclosed '{{' in f-string"));
+                }
+            } else {
+                parts.push(FStringPart::Literal(content[start..].to_string()));
+                break;
+            }
+        }
+        Ok(Expr::FString(parts))
     }
 }

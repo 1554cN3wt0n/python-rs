@@ -1,0 +1,40 @@
+# examples/power_features.pyrs
+
+print("--- 1. Iterators & Iterables ---")
+# Testing range() as an iterator
+r = range(5)
+print(f"Range object: {r}")
+
+# Testing for loop on range
+print("Iterating range(5):")
+for i in r:
+    print(f"  Value: {i}")
+
+# Testing for loop on String
+print("Iterating String 'PyRS':")
+for char in "PyRS":
+    print(f"  Char: {char}")
+
+print("\n--- 2. f-strings ---")
+name = "Elvin"
+version = 4
+msg = f"Hello {name}, welcome to PyRS Phase 4 (Functional)!"
+print(msg)
+print(f"Calculation in f-string: 10 + 20 = {10 + 20}")
+
+print("\n--- 3. Functional Built-ins ---")
+nums = [1, 2, 3, 4, 5]
+print(f"List: {nums}")
+print(f"Sum: {sum(nums)}")
+print(f"Max: {max(nums)}")
+print(f"Min: {min(nums)}")
+
+# map and filter (injected via PyRS)
+squares = map(lambda x: x * x, nums)
+print(f"Squares (map): {squares}")
+
+evens = filter(lambda x: x % 2 == 0, nums)
+print(f"Evens (filter): {evens}")
+
+print(f"Any > 4? {any([x > 4 for x in nums])}")
+print(f"All > 0? {all([x > 0 for x in nums])}")

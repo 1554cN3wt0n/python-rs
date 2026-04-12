@@ -37,7 +37,51 @@ pub enum PyObject {
         class: Rc<RefCell<PyObject>>,
         attributes: Rc<RefCell<HashMap<String, PyObject>>>,
     },
+    Iterator(Rc<RefCell<PyIterator>>),
     None,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PyIterator {
+    List(Rc<RefCell<Vec<PyObject>>>, usize),
+    String(String, usize),
+    Range(i64, i64, i64), // current, stop, step
+}
+
+impl PyIterator {
+    pub fn next(&mut self) -> Option<PyObject> {
+        match self {
+            PyIterator::List(l, idx) => {
+                let items = l.borrow();
+                if *idx < items.len() {
+                    let val = items[*idx].clone();
+                    *idx += 1;
+                    Some(val)
+                } else {
+                    None
+                }
+            }
+            PyIterator::String(s, idx) => {
+                let chars: Vec<char> = s.chars().collect();
+                if *idx < chars.len() {
+                    let val = PyObject::String(chars[*idx].to_string());
+                    *idx += 1;
+                    Some(val)
+                } else {
+                    None
+                }
+            }
+            PyIterator::Range(curr, stop, step) => {
+                if (*step > 0 && *curr < *stop) || (*step < 0 && *curr > *stop) {
+                    let val = PyObject::Int(*curr);
+                    *curr += *step;
+                    Some(val)
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Debug for PyObject {
@@ -59,6 +103,7 @@ impl fmt::Debug for PyObject {
                 .finish_non_exhaustive(),
             PyObject::Type(name) => f.debug_tuple("Type").field(name).finish(),
             PyObject::Module { name, .. } => f.debug_tuple("Module").field(name).finish(),
+            PyObject::Iterator(it) => f.debug_tuple("Iterator").field(it).finish(),
             PyObject::Slice { start, stop, step } => f
                 .debug_struct("Slice")
                 .field("start", start)
@@ -99,11 +144,7 @@ impl PartialEq for PyObject {
                     step: b_step,
                 },
             ) => a_start == b_start && a_stop == b_stop && a_step == b_step,
-            (PyObject::Module { name: a, .. }, PyObject::Module { name: b, .. }) => a == b,
-            (
-                PyObject::Instance { attributes: a, .. },
-                PyObject::Instance { attributes: b, .. },
-            ) => Rc::ptr_eq(a, b),
+            (PyObject::Iterator(a), PyObject::Iterator(b)) => Rc::ptr_eq(a, b),
             (PyObject::None, PyObject::None) => true,
             _ => false,
         }
@@ -143,6 +184,7 @@ impl fmt::Display for PyObject {
             PyObject::Class { name, .. } => write!(f, "<class {}>", name),
             PyObject::Type(name) => write!(f, "<type {}>", name),
             PyObject::Module { name, .. } => write!(f, "<module {}>", name),
+            PyObject::Iterator(_) => write!(f, "<iterator object>"),
             PyObject::Slice { start, stop, step } => {
                 write!(f, "slice(")?;
                 if let Some(s) = start {
@@ -171,6 +213,17 @@ impl fmt::Display for PyObject {
                 }
             }
             PyObject::None => write!(f, "None"),
+        }
+    }
+}
+
+impl PyObject {
+    pub fn to_iterator(&self) -> Option<Rc<RefCell<PyIterator>>> {
+        match self {
+            PyObject::List(l) => Some(Rc::new(RefCell::new(PyIterator::List(l.clone(), 0)))),
+            PyObject::String(s) => Some(Rc::new(RefCell::new(PyIterator::String(s.clone(), 0)))),
+            PyObject::Iterator(it) => Some(it.clone()),
+            _ => None,
         }
     }
 }

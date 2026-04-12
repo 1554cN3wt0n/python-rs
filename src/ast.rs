@@ -25,6 +25,13 @@ pub enum Expr {
         stop: Option<Box<Expr>>,
         step: Option<Box<Expr>>,
     },
+    FString(Vec<FStringPart>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FStringPart {
+    Literal(String),
+    Expression(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]

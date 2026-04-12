@@ -49,19 +49,23 @@ impl Evaluator {
         global_env.borrow_mut().define(
             "range".to_string(),
             PyObject::BuiltinFunction(Rc::new(|args| {
-                let (start, stop) = match args.len() {
-                    1 => (0, args[0].as_int().cloned().unwrap_or(0)),
+                let (start, stop, step) = match args.len() {
+                    1 => (0, args[0].as_int().cloned().unwrap_or(0), 1),
                     2 => (
                         args[0].as_int().cloned().unwrap_or(0),
                         args[1].as_int().cloned().unwrap_or(0),
+                        1,
                     ),
-                    _ => (0, 0),
+                    3 => (
+                        args[0].as_int().cloned().unwrap_or(0),
+                        args[1].as_int().cloned().unwrap_or(0),
+                        args[2].as_int().cloned().unwrap_or(1),
+                    ),
+                    _ => (0, 0, 1),
                 };
-                let mut items = Vec::new();
-                for i in start..stop {
-                    items.push(PyObject::Int(i));
-                }
-                PyObject::List(Rc::new(RefCell::new(items)))
+                PyObject::Iterator(Rc::new(RefCell::new(crate::object::PyIterator::Range(
+                    start, stop, step,
+                ))))
             })),
         );
 
@@ -96,6 +100,7 @@ impl Evaluator {
                     PyObject::BuiltinFunction(_) => {
                         PyObject::String("builtin_function".to_string())
                     }
+                    PyObject::Iterator(_) => PyObject::String("iterator".to_string()),
                     PyObject::None => PyObject::String("NoneType".to_string()),
                 }
             })),
@@ -177,10 +182,171 @@ impl Evaluator {
             })),
         );
 
-        Self {
+        // Core built-ins for iterators
+        global_env.borrow_mut().define(
+            "iter".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::None;
+                }
+                let obj = &args[0];
+                match obj {
+                    PyObject::List(l) => PyObject::Iterator(Rc::new(RefCell::new(
+                        crate::object::PyIterator::List(l.clone(), 0),
+                    ))),
+                    PyObject::String(s) => PyObject::Iterator(Rc::new(RefCell::new(
+                        crate::object::PyIterator::String(s.clone(), 0),
+                    ))),
+                    PyObject::Iterator(it) => PyObject::Iterator(it.clone()),
+                    _ => {
+                        // In a full implementation, we'd check for __iter__ method
+                        PyObject::None
+                    }
+                }
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "next".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::None;
+                }
+                if let PyObject::Iterator(it) = &args[0] {
+                    let mut it_borrow = it.borrow_mut();
+                    it_borrow.next().unwrap_or(PyObject::None)
+                } else {
+                    PyObject::None
+                }
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "sum".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::Int(0);
+                }
+                let mut total = 0;
+                if let Some(it) = args[0].to_iterator() {
+                    let mut it_borrow = it.borrow_mut();
+                    while let Some(val) = it_borrow.next() {
+                        if let PyObject::Int(n) = val {
+                            total += n;
+                        }
+                    }
+                }
+                PyObject::Int(total)
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "max".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::None;
+                }
+                let mut max_val: Option<i64> = None;
+                if let Some(it) = args[0].to_iterator() {
+                    let mut it_borrow = it.borrow_mut();
+                    while let Some(val) = it_borrow.next() {
+                        if let PyObject::Int(n) = val {
+                            if max_val.is_none() || n > max_val.unwrap() {
+                                max_val = Some(n);
+                            }
+                        }
+                    }
+                }
+                max_val.map(PyObject::Int).unwrap_or(PyObject::None)
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "min".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::None;
+                }
+                let mut min_val: Option<i64> = None;
+                if let Some(it) = args[0].to_iterator() {
+                    let mut it_borrow = it.borrow_mut();
+                    while let Some(val) = it_borrow.next() {
+                        if let PyObject::Int(n) = val {
+                            if min_val.is_none() || n < min_val.unwrap() {
+                                min_val = Some(n);
+                            }
+                        }
+                    }
+                }
+                min_val.map(PyObject::Int).unwrap_or(PyObject::None)
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "all".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::Bool(true);
+                }
+                if let Some(it) = args[0].to_iterator() {
+                    let mut it_borrow = it.borrow_mut();
+                    while let Some(val) = it_borrow.next() {
+                        match val {
+                            PyObject::Bool(b) if !b => return PyObject::Bool(false),
+                            PyObject::None => return PyObject::Bool(false),
+                            PyObject::Int(0) => return PyObject::Bool(false),
+                            _ => {}
+                        }
+                    }
+                }
+                PyObject::Bool(true)
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "any".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::Bool(false);
+                }
+                if let Some(it) = args[0].to_iterator() {
+                    let mut it_borrow = it.borrow_mut();
+                    while let Some(val) = it_borrow.next() {
+                        match val {
+                            PyObject::Bool(b) if b => return PyObject::Bool(true),
+                            PyObject::Int(n) if n != 0 => return PyObject::Bool(true),
+                            PyObject::String(s) if !s.is_empty() => return PyObject::Bool(true),
+                            PyObject::List(l) if !l.borrow().is_empty() => {
+                                return PyObject::Bool(true);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                PyObject::Bool(false)
+            })),
+        );
+
+        let mut evaluator = Self {
             global_env,
             load_paths,
+        };
+
+        // Inject high-level functions using PyRS code
+        let lib = "
+def map(f, it):
+    return [f(x) for x in it]
+
+def filter(f, it):
+    return [x for x in it if f(x)]
+";
+        let lexer = crate::lexer::Lexer::new(lib);
+        let mut parser = crate::parser::Parser::new(lexer);
+        if let Ok(stmts) = parser.parse() {
+            let _ = evaluator.eval_statements(&stmts, evaluator.global_env.clone());
         }
+
+        evaluator
     }
 
     pub fn add_load_path(&self, path: String) {
@@ -281,12 +447,37 @@ impl Evaluator {
                 body,
             } => {
                 let iter_val = self.eval_expression(iterable, env.clone())?;
-                let items = match iter_val {
-                    PyObject::List(l) => l.borrow().clone(),
+
+                // Get iterator
+                let iterator = match iter_val {
+                    PyObject::List(l) => PyObject::Iterator(Rc::new(RefCell::new(
+                        crate::object::PyIterator::List(l, 0),
+                    ))),
+                    PyObject::String(s) => PyObject::Iterator(Rc::new(RefCell::new(
+                        crate::object::PyIterator::String(s, 0),
+                    ))),
+                    PyObject::Iterator(it) => PyObject::Iterator(it),
                     _ => return Err(anyhow!("Object is not iterable")),
                 };
 
-                for item in items {
+                // Create 'next' caller
+                let next_key = "next".to_string();
+                let next_fn = self
+                    .global_env
+                    .borrow()
+                    .get(&next_key)
+                    .ok_or_else(|| anyhow!("Built-in 'next' not found"))?;
+
+                loop {
+                    let item = match next_fn {
+                        PyObject::BuiltinFunction(ref f) => f(vec![iterator.clone()]),
+                        _ => unreachable!(),
+                    };
+
+                    if item == PyObject::None {
+                        break;
+                    }
+
                     env.borrow_mut().define(target.clone(), item);
                     if let Some(val) = self.eval_block(body, env.clone())? {
                         return Ok(Some(val));
@@ -886,6 +1077,38 @@ impl Evaluator {
                         }
                         Err(anyhow!("Module '{}' has no attribute '{}'", name, attr))
                     }
+                    PyObject::List(l) => match attr.as_str() {
+                        "append" | "push" => {
+                            let l_clone = l.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |args| {
+                                if !args.is_empty() {
+                                    l_clone.borrow_mut().push(args[0].clone());
+                                }
+                                PyObject::None
+                            })))
+                        }
+                        _ => Err(anyhow!("List object has no attribute '{}'", attr)),
+                    },
+                    PyObject::Dict(d) => match attr.as_str() {
+                        "get" => {
+                            let d_clone = d.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |args| {
+                                if args.is_empty() {
+                                    return PyObject::None;
+                                }
+                                let key = args[0].to_string();
+                                let borrow = d_clone.borrow();
+                                if let Some(val) = borrow.get(&key) {
+                                    val.clone()
+                                } else if args.len() > 1 {
+                                    args[1].clone()
+                                } else {
+                                    PyObject::None
+                                }
+                            })))
+                        }
+                        _ => Err(anyhow!("Dict object has no attribute '{}'", attr)),
+                    },
                     _ => Err(anyhow!("Object has no attributes: {:?}", val)),
                 }
             }
@@ -896,13 +1119,13 @@ impl Evaluator {
                 condition,
             } => {
                 let iter_val = self.eval_expression(iterable, env.clone())?;
-                let items = match iter_val {
-                    PyObject::List(l) => l.borrow().clone(),
-                    _ => return Err(anyhow!("Object is not iterable")),
-                };
+                let it_rc = iter_val
+                    .to_iterator()
+                    .ok_or_else(|| anyhow!("Object is not iterable"))?;
+                let mut it = it_rc.borrow_mut();
 
                 let mut results = Vec::new();
-                for item in items {
+                while let Some(item) = it.next() {
                     let mut comp_env = Environment::with_parent(env.clone());
                     comp_env.define(target.clone(), item);
                     let rc_comp_env = Rc::new(RefCell::new(comp_env));
@@ -944,6 +1167,19 @@ impl Evaluator {
                     stop: p.map(Box::new),
                     step: t.map(Box::new),
                 })
+            }
+            Expr::FString(parts) => {
+                let mut result = String::new();
+                for part in parts {
+                    match part {
+                        crate::ast::FStringPart::Literal(s) => result.push_str(s),
+                        crate::ast::FStringPart::Expression(e) => {
+                            let val = self.eval_expression(e, env.clone())?;
+                            result.push_str(&val.to_string());
+                        }
+                    }
+                }
+                Ok(PyObject::String(result))
             }
         }
     }

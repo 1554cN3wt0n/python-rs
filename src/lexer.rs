@@ -56,6 +56,12 @@ pub enum RawToken {
     })]
     String(String),
 
+    #[regex(r#"f"([^"\\]|\\.)*""#, |lex| {
+        let s = lex.slice();
+        s[2..s.len()-1].to_string()
+    })]
+    FString(String),
+
     #[token("=")]
     Assign,
     #[token("+")]
