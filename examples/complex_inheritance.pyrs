@@ -1,0 +1,56 @@
+# Complex Inheritance Example: Vehicle System
+
+class Vehicle:
+    def __init__(self, brand, model):
+        self.brand = brand
+        self.model = model
+
+    def get_description(self):
+        return self.brand + " " + self.model
+
+    def start_engine(self):
+        print("Starting engine for", self.get_description())
+
+class Car(Vehicle):
+    def __init__(self, brand, model, doors):
+        Vehicle.__init__(self, brand, model)
+        self.doors = doors
+
+    def get_description(self):
+        # Combining parent description with Car specific info
+        return "Car: " + self.brand + " " + self.model + " (" + str(self.doors) + " doors)"
+
+    def honk(self):
+        print("Honk! Honk!")
+
+class ElectricCar(Car):
+    def __init__(self, brand, model, doors, battery):
+        Car.__init__(self, brand, model, doors)
+        self.battery = battery
+
+    def get_description(self):
+        desc = "Electric " + Car.get_description(self)
+        return desc + " [Battery: " + str(self.battery) + "kWh]"
+
+    def charge(self):
+        print("Charging the", self.brand, "...")
+
+# Create a fleet of vehicles
+print("--- Creating fleet ---")
+v1 = Vehicle("Generic", "Truck")
+v2 = Car("Toyota", "Camry", 4)
+v3 = ElectricCar("Tesla", "Model 3", 4, 75)
+
+fleet = [v1, v2, v3]
+
+# Test Polymorphism
+print("--- Fleet Review ---")
+for v in fleet:
+    print("Description:", v.get_description())
+    v.start_engine()
+    print("")
+
+print("--- Specific Tests ---")
+v2.honk()
+v3.charge()
+v3.honk() # Inherited from Car

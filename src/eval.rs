@@ -192,36 +192,37 @@ impl Evaluator {
                 env.borrow_mut().define(name.clone(), func);
                 Ok(None)
             }
-            Stmt::ClassDef { name, methods } => {
+            Stmt::ClassDef {
+                name,
+                bases,
+                methods,
+            } => {
+                let mut evaluated_bases = Vec::new();
+                for base_expr in bases {
+                    evaluated_bases.push(self.eval_expression(base_expr, env.clone())?);
+                }
+
                 let mut class_methods = HashMap::new();
                 for stmt in methods {
                     if let Stmt::FunctionDef { name: m_name, .. } = stmt {
                         // Create method
-                        if let Some(PyObject::Function { name, params, body }) =
-                            self.eval_statement(stmt, env.clone())?
-                        {
-                            class_methods
-                                .insert(m_name.clone(), PyObject::Function { name, params, body });
-                        } else {
-                            // eval_statement for FunctionDef returns None but defines it in env.
-                            // We need it as an object.
-                            let func = PyObject::Function {
-                                name: m_name.clone(),
-                                params: match stmt {
-                                    Stmt::FunctionDef { params, .. } => params.clone(),
-                                    _ => unreachable!(),
-                                },
-                                body: match stmt {
-                                    Stmt::FunctionDef { body, .. } => body.clone(),
-                                    _ => unreachable!(),
-                                },
-                            };
-                            class_methods.insert(m_name.clone(), func);
-                        }
+                        let func = PyObject::Function {
+                            name: m_name.clone(),
+                            params: match stmt {
+                                Stmt::FunctionDef { params, .. } => params.clone(),
+                                _ => unreachable!(),
+                            },
+                            body: match stmt {
+                                Stmt::FunctionDef { body, .. } => body.clone(),
+                                _ => unreachable!(),
+                            },
+                        };
+                        class_methods.insert(m_name.clone(), func);
                     }
                 }
                 let class = PyObject::Class {
                     name: name.clone(),
+                    bases: evaluated_bases,
                     methods: class_methods,
                 };
                 env.borrow_mut().define(name.clone(), class);
@@ -408,13 +409,16 @@ impl Evaluator {
                             return Ok(v.clone());
                         }
                         let class_borrow = class.borrow();
-                        if let PyObject::Class { methods, .. } = &*class_borrow
-                            && let Some(method) = methods.get(attr)
-                        {
-                            // Bind method? (Omitted for simplicity, just return func)
-                            return Ok(method.clone());
+                        if let Some(method) = self.find_method(&class_borrow, attr) {
+                            return Ok(method);
                         }
                         Err(anyhow!("Attribute '{}' not found", attr))
+                    }
+                    PyObject::Class { .. } => {
+                        if let Some(method) = self.find_method(&val, attr) {
+                            return Ok(method);
+                        }
+                        Err(anyhow!("Attribute '{}' not found on class", attr))
                     }
                     PyObject::List(l) => {
                         if attr == "push" {
@@ -493,5 +497,20 @@ impl Evaluator {
             PyObject::Dict(d) => !d.borrow().is_empty(),
             _ => true,
         }
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    fn find_method(&self, class: &PyObject, name: &str) -> Option<PyObject> {
+        if let PyObject::Class { methods, bases, .. } = class {
+            if let Some(method) = methods.get(name) {
+                return Some(method.clone());
+            }
+            for base in bases {
+                if let Some(method) = self.find_method(base, name) {
+                    return Some(method);
+                }
+            }
+        }
+        None
     }
 }

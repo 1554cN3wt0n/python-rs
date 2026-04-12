@@ -1,0 +1,40 @@
+# Class Inheritance Example
+
+class Person:
+    def __init__(self, name):
+        self.name = name
+
+    def greet(self):
+        print("Hello, my name is", self.name)
+
+    def species(self):
+        print("I am a human")
+
+class Student(Person):
+    def __init__(self, name, student_id):
+        # We don't have super(), so we call parent __init__ manually
+        Person.__init__(self, name)
+        self.student_id = student_id
+
+    def greet(self):
+        print("Hello, I am student", self.name, "with ID", self.student_id)
+
+# Test instantiation and inheritance
+alice = Person("Alice")
+alice.greet()
+alice.species()
+
+print("---")
+
+bob = Student("Bob", 12345)
+# Overridden method
+bob.greet()
+# Inherited method
+bob.species()
+
+print("---")
+
+# Verify attribute inheritance
+print("Alice name:", alice.name)
+print("Bob name:", bob.name)
+print("Bob ID:", bob.student_id)

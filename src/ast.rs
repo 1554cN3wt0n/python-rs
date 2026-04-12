@@ -66,6 +66,7 @@ pub enum Stmt {
     },
     ClassDef {
         name: String,
+        bases: Vec<Expr>,
         methods: Vec<Stmt>,
     },
     Return(Option<Expr>),

@@ -85,11 +85,28 @@ impl Parser {
             _ => return Err(anyhow!("Expected class name")),
         };
 
+        let mut bases = Vec::new();
+        if self.lexer.peek() == Token::Raw(RawToken::LParen) {
+            self.lexer.next(); // consume '('
+            while self.lexer.peek() != Token::Raw(RawToken::RParen)
+                && self.lexer.peek() != Token::Eof
+            {
+                bases.push(self.parse_expression()?);
+                if self.lexer.peek() == Token::Raw(RawToken::Comma) {
+                    self.lexer.next();
+                } else {
+                    break;
+                }
+            }
+            self.expect(Token::Raw(RawToken::RParen))?;
+        }
+
         self.expect(Token::Raw(RawToken::Colon))?;
         self.consume_newline()?;
         let body = self.parse_block()?;
         Ok(Stmt::ClassDef {
             name,
+            bases,
             methods: body,
         })
     }

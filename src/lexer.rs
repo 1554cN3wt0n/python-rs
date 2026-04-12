@@ -1,7 +1,7 @@
 use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
-#[logos(skip r"[ \t\f]+")]
+#[logos(skip(r"[ \t\f]+|#[^\n]*", allow_greedy = true))]
 pub enum RawToken {
     #[token("def")]
     Def,

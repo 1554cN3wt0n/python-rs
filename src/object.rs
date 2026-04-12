@@ -20,6 +20,7 @@ pub enum PyObject {
     BuiltinFunction(Rc<dyn Fn(Vec<PyObject>) -> PyObject>),
     Class {
         name: String,
+        bases: Vec<PyObject>,
         methods: HashMap<String, PyObject>,
     },
     Instance {
