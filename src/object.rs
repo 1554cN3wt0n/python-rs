@@ -23,6 +23,16 @@ pub enum PyObject {
         bases: Vec<PyObject>,
         methods: HashMap<String, PyObject>,
     },
+    Type(String),
+    Module {
+        name: String,
+        env: Rc<RefCell<HashMap<String, PyObject>>>,
+    },
+    Slice {
+        start: Option<Box<PyObject>>,
+        stop: Option<Box<PyObject>>,
+        step: Option<Box<PyObject>>,
+    },
     Instance {
         class: Rc<RefCell<PyObject>>,
         attributes: Rc<RefCell<HashMap<String, PyObject>>>,
@@ -47,6 +57,14 @@ impl fmt::Debug for PyObject {
                 .debug_struct("Class")
                 .field("name", name)
                 .finish_non_exhaustive(),
+            PyObject::Type(name) => f.debug_tuple("Type").field(name).finish(),
+            PyObject::Module { name, .. } => f.debug_tuple("Module").field(name).finish(),
+            PyObject::Slice { start, stop, step } => f
+                .debug_struct("Slice")
+                .field("start", start)
+                .field("stop", stop)
+                .field("step", step)
+                .finish(),
             PyObject::Instance { .. } => f.debug_struct("Instance").finish_non_exhaustive(),
             PyObject::None => write!(f, "None"),
         }
@@ -68,6 +86,20 @@ impl PartialEq for PyObject {
             (PyObject::Function { name: a, .. }, PyObject::Function { name: b, .. }) => a == b,
             (PyObject::BuiltinFunction(a), PyObject::BuiltinFunction(b)) => Rc::ptr_eq(a, b),
             (PyObject::Class { name: a, .. }, PyObject::Class { name: b, .. }) => a == b,
+            (PyObject::Type(a), PyObject::Type(b)) => a == b,
+            (
+                PyObject::Slice {
+                    start: a_start,
+                    stop: a_stop,
+                    step: a_step,
+                },
+                PyObject::Slice {
+                    start: b_start,
+                    stop: b_stop,
+                    step: b_step,
+                },
+            ) => a_start == b_start && a_stop == b_stop && a_step == b_step,
+            (PyObject::Module { name: a, .. }, PyObject::Module { name: b, .. }) => a == b,
             (
                 PyObject::Instance { attributes: a, .. },
                 PyObject::Instance { attributes: b, .. },
@@ -109,6 +141,27 @@ impl fmt::Display for PyObject {
             PyObject::Function { name, .. } => write!(f, "<function {}>", name),
             PyObject::BuiltinFunction(_) => write!(f, "<built-in function>"),
             PyObject::Class { name, .. } => write!(f, "<class {}>", name),
+            PyObject::Type(name) => write!(f, "<type {}>", name),
+            PyObject::Module { name, .. } => write!(f, "<module {}>", name),
+            PyObject::Slice { start, stop, step } => {
+                write!(f, "slice(")?;
+                if let Some(s) = start {
+                    write!(f, "{}, ", s)?;
+                } else {
+                    write!(f, "None, ")?;
+                }
+                if let Some(s) = stop {
+                    write!(f, "{}, ", s)?;
+                } else {
+                    write!(f, "None, ")?;
+                }
+                if let Some(s) = step {
+                    write!(f, "{}", s)?;
+                } else {
+                    write!(f, "None")?;
+                }
+                write!(f, ")")
+            }
             PyObject::Instance { class, .. } => {
                 let class_borrow = class.borrow();
                 if let PyObject::Class { name, .. } = &*class_borrow {

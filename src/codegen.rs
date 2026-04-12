@@ -105,6 +105,7 @@ impl Codegen {
                     BinaryOp::Sub => self.builder.push_op(WasmOp::I32Sub),
                     BinaryOp::Mul => self.builder.push_op(WasmOp::I32Mul),
                     BinaryOp::Div => self.builder.push_op(WasmOp::I32DivS),
+                    BinaryOp::Mod => self.builder.push_op(WasmOp::I32RemS),
                     BinaryOp::Equal => self.builder.push_op(WasmOp::I32Eq),
                     BinaryOp::NotEqual => self.builder.push_op(WasmOp::I32Ne),
                     BinaryOp::Less => self.builder.push_op(WasmOp::I32LtS),

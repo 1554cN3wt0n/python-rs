@@ -27,8 +27,10 @@ impl Parser {
                 self.lexer.next();
                 Ok(None)
             }
+            Token::Raw(RawToken::Import) => self.parse_import_statement().map(Some),
             Token::Raw(RawToken::Def) => Ok(Some(self.parse_function_def()?)),
-            Token::Raw(RawToken::If) => Ok(Some(self.parse_if_statement()?)),
+            Token::Raw(RawToken::Try) => self.parse_try_statement().map(Some),
+            Token::Raw(RawToken::If) => self.parse_if_statement().map(Some),
             Token::Raw(RawToken::While) => Ok(Some(self.parse_while_statement()?)),
             Token::Raw(RawToken::For) => Ok(Some(self.parse_for_statement()?)),
             Token::Raw(RawToken::Class) => Ok(Some(self.parse_class_def()?)),
@@ -46,6 +48,16 @@ impl Parser {
                 }
             }
         }
+    }
+
+    fn parse_import_statement(&mut self) -> Result<Stmt> {
+        self.lexer.next(); // consume 'import'
+        let name = match self.lexer.next() {
+            Token::Raw(RawToken::Identifier(id)) => id,
+            _ => return Err(anyhow!("Expected identifier after 'import'")),
+        };
+        self.consume_newline()?;
+        Ok(Stmt::Import(name))
     }
 
     fn parse_function_def(&mut self) -> Result<Stmt> {
@@ -145,6 +157,46 @@ impl Parser {
         Ok(Stmt::While { condition, body })
     }
 
+    fn parse_try_statement(&mut self) -> Result<Stmt> {
+        self.lexer.next(); // consume 'try'
+        self.expect(Token::Raw(RawToken::Colon))?;
+        self.consume_newline()?;
+        let body = self.parse_block()?;
+
+        let mut handlers = Vec::new();
+        while self.lexer.peek() == Token::Raw(RawToken::Except) {
+            self.lexer.next(); // consume 'except'
+            let mut type_ = None;
+            let mut name = None;
+
+            if self.lexer.peek() != Token::Raw(RawToken::Colon) {
+                type_ = Some(self.parse_expression()?);
+                if self.lexer.peek() == Token::Raw(RawToken::As) {
+                    self.lexer.next();
+                    match self.lexer.next() {
+                        Token::Raw(RawToken::Identifier(id)) => name = Some(id),
+                        _ => return Err(anyhow!("Expected identifier after 'as'")),
+                    }
+                }
+            }
+
+            self.expect(Token::Raw(RawToken::Colon))?;
+            self.consume_newline()?;
+            let handler_body = self.parse_block()?;
+            handlers.push(ExceptHandler {
+                type_,
+                name,
+                body: handler_body,
+            });
+        }
+
+        if handlers.is_empty() {
+            return Err(anyhow!("Expected at least one 'except' block after 'try'"));
+        }
+
+        Ok(Stmt::Try { body, handlers })
+    }
+
     fn parse_for_statement(&mut self) -> Result<Stmt> {
         self.lexer.next(); // consume 'for'
         let target = match self.lexer.next() {
@@ -188,7 +240,35 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expr> {
-        self.parse_logical_or()
+        if self.lexer.peek() == Token::Raw(RawToken::Lambda) {
+            self.parse_lambda()
+        } else {
+            self.parse_logical_or()
+        }
+    }
+
+    fn parse_lambda(&mut self) -> Result<Expr> {
+        self.lexer.next(); // consume 'lambda'
+        let mut params = Vec::new();
+        if self.lexer.peek() != Token::Raw(RawToken::Colon) {
+            loop {
+                match self.lexer.next() {
+                    Token::Raw(RawToken::Identifier(id)) => params.push(id),
+                    _ => return Err(anyhow!("Expected identifier in lambda params")),
+                }
+                if self.lexer.peek() == Token::Raw(RawToken::Comma) {
+                    self.lexer.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::Raw(RawToken::Colon))?;
+        let body = self.parse_expression()?;
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        })
     }
 
     fn parse_logical_or(&mut self) -> Result<Expr> {
@@ -202,22 +282,33 @@ impl Parser {
     }
 
     fn parse_logical_and(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_logical_not()?;
+        let mut expr = self.parse_unary()?;
         while self.lexer.peek() == Token::Raw(RawToken::And) {
             self.lexer.next();
-            let right = self.parse_logical_not()?;
+            let right = self.parse_unary()?;
             expr = Expr::Logical(Box::new(expr), LogicalOp::And, Box::new(right));
         }
         Ok(expr)
     }
 
-    fn parse_logical_not(&mut self) -> Result<Expr> {
-        if self.lexer.peek() == Token::Raw(RawToken::Not) {
-            self.lexer.next();
-            let expr = self.parse_logical_not()?;
-            Ok(Expr::Unary(LogicalOp::Not, Box::new(expr)))
-        } else {
-            self.parse_equality()
+    fn parse_unary(&mut self) -> Result<Expr> {
+        match self.lexer.peek() {
+            Token::Raw(RawToken::Not) => {
+                self.lexer.next();
+                let expr = self.parse_unary()?;
+                Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)))
+            }
+            Token::Raw(RawToken::Plus) => {
+                self.lexer.next();
+                let expr = self.parse_unary()?;
+                Ok(Expr::Unary(UnaryOp::Pos, Box::new(expr)))
+            }
+            Token::Raw(RawToken::Minus) => {
+                self.lexer.next();
+                let expr = self.parse_unary()?;
+                Ok(Expr::Unary(UnaryOp::Neg, Box::new(expr)))
+            }
+            _ => self.parse_equality(),
         }
     }
 
@@ -283,11 +374,14 @@ impl Parser {
         let mut expr = self.parse_postfix()?;
         while matches!(
             self.lexer.peek(),
-            Token::Raw(RawToken::Multiply) | Token::Raw(RawToken::Divide)
+            Token::Raw(RawToken::Multiply)
+                | Token::Raw(RawToken::Divide)
+                | Token::Raw(RawToken::Percent)
         ) {
             let op = match self.lexer.next() {
                 Token::Raw(RawToken::Multiply) => BinaryOp::Mul,
                 Token::Raw(RawToken::Divide) => BinaryOp::Div,
+                Token::Raw(RawToken::Percent) => BinaryOp::Mod,
                 _ => unreachable!(),
             };
             let right = self.parse_postfix()?;
@@ -318,7 +412,17 @@ impl Parser {
                 }
                 Token::Raw(RawToken::LBracket) => {
                     self.lexer.next();
-                    let index = self.parse_expression()?;
+                    let index = if self.lexer.peek() == Token::Raw(RawToken::Colon) {
+                        // Empty start slice like [:5]
+                        self.parse_slice(None)?
+                    } else {
+                        let first = self.parse_expression()?;
+                        if self.lexer.peek() == Token::Raw(RawToken::Colon) {
+                            self.parse_slice(Some(first))?
+                        } else {
+                            first
+                        }
+                    };
                     self.expect(Token::Raw(RawToken::RBracket))?;
                     expr = Expr::Subscript(Box::new(expr), Box::new(index));
                 }
@@ -345,16 +449,41 @@ impl Parser {
             Token::Raw(RawToken::Integer(n)) => Ok(Expr::Literal(Literal::Int(n))),
             Token::Raw(RawToken::String(s)) => Ok(Expr::Literal(Literal::String(s))),
             Token::Raw(RawToken::LBracket) => {
-                let mut items = Vec::new();
-                if self.lexer.peek() != Token::Raw(RawToken::RBracket) {
-                    loop {
-                        items.push(self.parse_expression()?);
-                        if self.lexer.peek() == Token::Raw(RawToken::Comma) {
-                            self.lexer.next();
-                        } else {
-                            break;
-                        }
+                if self.lexer.peek() == Token::Raw(RawToken::RBracket) {
+                    self.lexer.next();
+                    return Ok(Expr::List(Vec::new()));
+                }
+
+                let expression = self.parse_expression()?;
+                if self.lexer.peek() == Token::Raw(RawToken::For) {
+                    self.lexer.next(); // consume 'for'
+                    let target = match self.lexer.next() {
+                        Token::Raw(RawToken::Identifier(id)) => id,
+                        _ => return Err(anyhow!("Expected identifier after 'for'")),
+                    };
+                    self.expect(Token::Raw(RawToken::In))?;
+                    let iterable = self.parse_expression()?;
+                    let mut condition = None;
+                    if self.lexer.peek() == Token::Raw(RawToken::If) {
+                        self.lexer.next();
+                        condition = Some(Box::new(self.parse_expression()?));
                     }
+                    self.expect(Token::Raw(RawToken::RBracket))?;
+                    return Ok(Expr::ListComprehension {
+                        expression: Box::new(expression),
+                        target,
+                        iterable: Box::new(iterable),
+                        condition,
+                    });
+                }
+
+                let mut items = vec![expression];
+                while self.lexer.peek() == Token::Raw(RawToken::Comma) {
+                    self.lexer.next();
+                    if self.lexer.peek() == Token::Raw(RawToken::RBracket) {
+                        break;
+                    }
+                    items.push(self.parse_expression()?);
                 }
                 self.expect(Token::Raw(RawToken::RBracket))?;
                 Ok(Expr::List(items))
@@ -385,6 +514,30 @@ impl Parser {
             }
             t => Err(anyhow!("Unexpected token: {:?}", t)),
         }
+    }
+
+    fn parse_slice(&mut self, start: Option<Expr>) -> Result<Expr> {
+        self.expect(Token::Raw(RawToken::Colon))?;
+        let mut stop = None;
+        if self.lexer.peek() != Token::Raw(RawToken::Colon)
+            && self.lexer.peek() != Token::Raw(RawToken::RBracket)
+        {
+            stop = Some(Box::new(self.parse_expression()?));
+        }
+
+        let mut step = None;
+        if self.lexer.peek() == Token::Raw(RawToken::Colon) {
+            self.lexer.next();
+            if self.lexer.peek() != Token::Raw(RawToken::RBracket) {
+                step = Some(Box::new(self.parse_expression()?));
+            }
+        }
+
+        Ok(Expr::Slice {
+            start: start.map(Box::new),
+            stop,
+            step,
+        })
     }
 
     fn expect(&mut self, expected: Token) -> Result<()> {

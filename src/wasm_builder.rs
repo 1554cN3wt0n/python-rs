@@ -12,6 +12,7 @@ pub enum WasmOp {
     I32Sub,
     I32Mul,
     I32DivS,
+    I32RemS,
     I32Eq,
     I32Ne,
     I32LtS,

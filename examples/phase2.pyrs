@@ -1,0 +1,31 @@
+# Phase 2: Exceptions & Slicing Verification
+
+print("--- Exceptions ---")
+try:
+    print("Trying division by zero...")
+    x = 1 / 0
+    print("This should NOT be printed")
+except:
+    print("Caught expected error (DivisionByZero)")
+
+try:
+    print("Trying invalid index...")
+    l = [1, 2, 3]
+    print(l[10])
+except:
+    print("Caught expected error (IndexError)")
+
+print("--- List Slicing ---")
+nums = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+print("nums[0:5]:", nums[0:5])
+print("nums[5:]:", nums[5:])
+print("nums[:3]:", nums[:3])
+print("nums[::2]:", nums[::2])
+print("nums[::-1]:", nums[::-1])
+print("nums[1:6:2]:", nums[1:6:2])
+
+print("--- String Slicing ---")
+s = "Hello World"
+print("s[0:5]:", s[0:5])
+print("s[6:]:", s[6:])
+print("s[::-1]:", s[::-1])

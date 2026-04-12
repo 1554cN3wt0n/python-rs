@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, Expr, Literal, LogicalOp, Stmt};
+use crate::ast::{BinaryOp, Expr, Literal, LogicalOp, Stmt, UnaryOp};
 use crate::env::Environment;
 use crate::object::PyObject;
 use anyhow::{Result, anyhow};
@@ -70,6 +70,102 @@ impl Evaluator {
                     return PyObject::None;
                 }
                 PyObject::String(args[0].to_string())
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "type".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.len() != 1 {
+                    return PyObject::None;
+                }
+                match &args[0] {
+                    PyObject::Int(_) => PyObject::String("int".to_string()),
+                    PyObject::String(_) => PyObject::String("str".to_string()),
+                    PyObject::Bool(_) => PyObject::String("bool".to_string()),
+                    PyObject::List(_) => PyObject::String("list".to_string()),
+                    PyObject::Dict(_) => PyObject::String("dict".to_string()),
+                    PyObject::Instance { class, .. } => class.borrow().clone(),
+                    PyObject::Class { .. } => args[0].clone(),
+                    PyObject::Type(_) => args[0].clone(),
+                    PyObject::Module { .. } => args[0].clone(),
+                    PyObject::Slice { .. } => PyObject::Type("slice".to_string()),
+                    PyObject::Function { .. } => PyObject::String("function".to_string()),
+                    PyObject::BuiltinFunction(_) => {
+                        PyObject::String("builtin_function".to_string())
+                    }
+                    PyObject::None => PyObject::String("NoneType".to_string()),
+                }
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "isinstance".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_| PyObject::None)),
+        );
+
+        global_env.borrow_mut().define(
+            "hasattr".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_| PyObject::None)),
+        );
+
+        // Primitive type markers
+        global_env
+            .borrow_mut()
+            .define("int".to_string(), PyObject::Type("int".to_string()));
+        global_env
+            .borrow_mut()
+            .define("str".to_string(), PyObject::Type("str".to_string()));
+        global_env
+            .borrow_mut()
+            .define("bool".to_string(), PyObject::Type("bool".to_string()));
+        global_env
+            .borrow_mut()
+            .define("list".to_string(), PyObject::Type("list".to_string()));
+        global_env
+            .borrow_mut()
+            .define("dict".to_string(), PyObject::Type("dict".to_string()));
+        global_env.borrow_mut().define(
+            "NoneType".to_string(),
+            PyObject::Type("NoneType".to_string()),
+        );
+
+        // File I/O
+        global_env.borrow_mut().define(
+            "open".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.is_empty() {
+                    return PyObject::None;
+                }
+                let filename = args[0].to_string();
+
+                let mut attributes = HashMap::new();
+                let f_name = filename.clone();
+
+                attributes.insert(
+                    "read".to_string(),
+                    PyObject::BuiltinFunction(Rc::new(move |_| {
+                        std::fs::read_to_string(&f_name)
+                            .map(PyObject::String)
+                            .unwrap_or(PyObject::None)
+                    })),
+                );
+
+                let f_name2 = filename.clone();
+                attributes.insert(
+                    "write".to_string(),
+                    PyObject::BuiltinFunction(Rc::new(move |f_args| {
+                        if let Some(PyObject::String(content)) = f_args.first() {
+                            std::fs::write(&f_name2, content).ok();
+                        }
+                        PyObject::None
+                    })),
+                );
+
+                PyObject::Instance {
+                    class: Rc::new(RefCell::new(PyObject::Type("file".to_string()))),
+                    attributes: Rc::new(RefCell::new(attributes)),
+                }
             })),
         );
 
@@ -236,6 +332,55 @@ impl Evaluator {
                 };
                 Ok(Some(val))
             }
+            Stmt::Import(name) => {
+                let filename = format!("{}.pyrs", name);
+                let content = std::fs::read_to_string(&filename)
+                    .map_err(|e| anyhow!("Could not import module '{}': {}", name, e))?;
+
+                let lexer = crate::lexer::Lexer::new(&content);
+                let mut parser = crate::parser::Parser::new(lexer);
+                let statements = parser.parse()?;
+
+                let mut module_evaluator = Evaluator::new();
+                module_evaluator.eval(&statements)?;
+
+                let module = PyObject::Module {
+                    name: name.clone(),
+                    env: Rc::new(RefCell::new(module_evaluator.global_env.borrow().values())),
+                };
+                env.borrow_mut().define(name.clone(), module);
+                Ok(None)
+            }
+            Stmt::Try { body, handlers } => {
+                match self.eval_block(body, env.clone()) {
+                    Ok(val) => Ok(val),
+                    Err(e) => {
+                        for handler in handlers {
+                            let mut matches = true;
+                            if let Some(type_expr) = &handler.type_ {
+                                let handler_type = self.eval_expression(type_expr, env.clone())?;
+                                // Simple matching for now: match if it's a Type or Class
+                                matches = matches
+                                    && (matches!(
+                                        handler_type,
+                                        PyObject::Type(_) | PyObject::Class { .. }
+                                    ));
+                            }
+                            if matches {
+                                let handler_env =
+                                    Rc::new(RefCell::new(Environment::with_parent(env.clone())));
+                                if let Some(name) = &handler.name {
+                                    handler_env
+                                        .borrow_mut()
+                                        .define(name.clone(), PyObject::String(e.to_string()));
+                                }
+                                return self.eval_block(&handler.body, handler_env);
+                            }
+                        }
+                        Err(e)
+                    }
+                }
+            }
         }
     }
 
@@ -286,25 +431,146 @@ impl Evaluator {
                 }
                 self.eval_expression(right, env)
             }
-            Expr::Unary(LogicalOp::Not, expr) => {
+            Expr::Unary(op, expr) => {
                 let val = self.eval_expression(expr, env)?;
-                Ok(PyObject::Bool(!self.is_truthy(&val)))
+                match op {
+                    UnaryOp::Not => Ok(PyObject::Bool(!self.is_truthy(&val))),
+                    UnaryOp::Neg => match val {
+                        PyObject::Int(n) => Ok(PyObject::Int(-n)),
+                        _ => Err(anyhow!("Unary minus only supports integers")),
+                    },
+                    UnaryOp::Pos => match val {
+                        PyObject::Int(n) => Ok(PyObject::Int(n)),
+                        _ => Err(anyhow!("Unary plus only supports integers")),
+                    },
+                }
             }
-            Expr::Unary(_, _) => unreachable!(),
-            Expr::Call(callee_expr, args) => {
-                let func = self.eval_expression(callee_expr, env.clone())?;
+            Expr::Call(callee, args) => {
+                let callee_val = self.eval_expression(callee, env.clone())?;
                 let mut evaluated_args = Vec::new();
                 for arg in args {
                     evaluated_args.push(self.eval_expression(arg, env.clone())?);
                 }
 
-                match func {
+                // Handle special built-ins that need Evaluator access
+                if let Expr::Variable(name) = &**callee {
+                    match name.as_str() {
+                        "isinstance" => {
+                            if evaluated_args.len() == 2 {
+                                let obj = &evaluated_args[0];
+                                let target_type = &evaluated_args[1];
+
+                                match (obj, target_type) {
+                                    (PyObject::Int(_), PyObject::Type(s)) if s == "int" => {
+                                        return Ok(PyObject::Bool(true));
+                                    }
+                                    (PyObject::String(_), PyObject::Type(s)) if s == "str" => {
+                                        return Ok(PyObject::Bool(true));
+                                    }
+                                    (PyObject::Bool(_), PyObject::Type(s)) if s == "bool" => {
+                                        return Ok(PyObject::Bool(true));
+                                    }
+                                    (PyObject::List(_), PyObject::Type(s)) if s == "list" => {
+                                        return Ok(PyObject::Bool(true));
+                                    }
+                                    (PyObject::Dict(_), PyObject::Type(s)) if s == "dict" => {
+                                        return Ok(PyObject::Bool(true));
+                                    }
+                                    (PyObject::None, PyObject::Type(s)) if s == "NoneType" => {
+                                        return Ok(PyObject::Bool(true));
+                                    }
+                                    (PyObject::Instance { class, .. }, _) => {
+                                        return Ok(PyObject::Bool(
+                                            self.is_subclass(&class.borrow(), target_type),
+                                        ));
+                                    }
+                                    _ => return Ok(PyObject::Bool(false)),
+                                }
+                            }
+                            return Ok(PyObject::Bool(false));
+                        }
+                        "hasattr" => {
+                            if evaluated_args.len() == 2 {
+                                let attr_name = evaluated_args[1].to_string();
+                                match &evaluated_args[0] {
+                                    PyObject::Instance { class, attributes } => {
+                                        if attributes.borrow().contains_key(&attr_name) {
+                                            return Ok(PyObject::Bool(true));
+                                        }
+                                        return Ok(PyObject::Bool(
+                                            self.find_method(&class.borrow(), &attr_name).is_some(),
+                                        ));
+                                    }
+                                    PyObject::Class { .. } => {
+                                        return Ok(PyObject::Bool(
+                                            self.find_method(&evaluated_args[0], &attr_name)
+                                                .is_some(),
+                                        ));
+                                    }
+                                    _ => return Ok(PyObject::Bool(false)),
+                                }
+                            }
+                            return Ok(PyObject::Bool(false));
+                        }
+                        "type" => {
+                            if evaluated_args.len() == 1 {
+                                match &evaluated_args[0] {
+                                    PyObject::Int(_) => {
+                                        return Ok(PyObject::Type("int".to_string()));
+                                    }
+                                    PyObject::String(_) => {
+                                        return Ok(PyObject::Type("str".to_string()));
+                                    }
+                                    PyObject::Bool(_) => {
+                                        return Ok(PyObject::Type("bool".to_string()));
+                                    }
+                                    PyObject::List(_) => {
+                                        return Ok(PyObject::Type("list".to_string()));
+                                    }
+                                    PyObject::Dict(_) => {
+                                        return Ok(PyObject::Type("dict".to_string()));
+                                    }
+                                    PyObject::None => {
+                                        return Ok(PyObject::Type("NoneType".to_string()));
+                                    }
+                                    PyObject::Instance { class, .. } => {
+                                        return Ok(class.borrow().clone());
+                                    }
+                                    PyObject::Class { .. } => return Ok(evaluated_args[0].clone()),
+                                    _ => {
+                                        return Err(anyhow!(
+                                            "type() not fully implemented for this type"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                match callee_val {
                     PyObject::BuiltinFunction(f) => Ok(f(evaluated_args)),
+                    PyObject::Type(name) => {
+                        // Constructor calls
+                        if evaluated_args.len() != 1 {
+                            return Err(anyhow!("Type constructor expected 1 argument"));
+                        }
+                        match name.as_str() {
+                            "str" => Ok(PyObject::String(evaluated_args[0].to_string())),
+                            "int" => match &evaluated_args[0] {
+                                PyObject::Int(n) => Ok(PyObject::Int(*n)),
+                                PyObject::String(s) => Ok(PyObject::Int(s.parse().unwrap_or(0))),
+                                _ => Err(anyhow!("Could not convert to int")),
+                            },
+                            _ => Err(anyhow!("Constructor not implemented for type {}", name)),
+                        }
+                    }
                     PyObject::Function { params, body, .. } => {
                         let mut call_args = evaluated_args;
 
                         // Check if this was an attribute access to bind 'self'
-                        if let Expr::Attribute(target_expr, _) = &**callee_expr {
+                        if let Expr::Attribute(target_expr, _) = &**callee {
                             let target_val = self.eval_expression(target_expr, env.clone())?;
                             if let PyObject::Instance { .. } = target_val {
                                 // Simple binding: insert instance as first arg
@@ -330,7 +596,7 @@ impl Evaluator {
                     PyObject::Class { ref methods, .. } => {
                         // Instantiation
                         let instance = PyObject::Instance {
-                            class: Rc::new(RefCell::new(func.clone())),
+                            class: Rc::new(RefCell::new(callee_val.clone())),
                             attributes: Rc::new(RefCell::new(HashMap::new())),
                         };
                         // Call __init__ if exists
@@ -352,7 +618,7 @@ impl Evaluator {
                         }
                         Ok(instance)
                     }
-                    _ => Err(anyhow!("Object is not callable")),
+                    _ => Err(anyhow!("Object is not callable: {:?}", callee_val)),
                 }
             }
             Expr::List(items) => {
@@ -372,47 +638,180 @@ impl Evaluator {
                 Ok(PyObject::Dict(Rc::new(RefCell::new(evaluated_items))))
             }
             Expr::Subscript(target, index_expr) => {
-                let val = self.eval_expression(target, env.clone())?;
+                let left = self.eval_expression(target, env.clone())?;
                 let index = self.eval_expression(index_expr, env.clone())?;
-                match val {
-                    PyObject::List(l) => {
-                        let i = index
-                            .as_int()
-                            .ok_or_else(|| anyhow!("Index must be an integer"))?;
-                        Ok(l.borrow()[*i as usize].clone())
-                    }
-                    PyObject::Dict(d) => {
-                        let key = index.to_string();
-                        Ok(d.borrow()
-                            .get(&key)
+                let res = match (left, index) {
+                    (PyObject::List(l), PyObject::Int(i)) => {
+                        let items = l.borrow();
+                        let mut idx = i;
+                        if idx < 0 {
+                            idx += items.len() as i64;
+                        }
+                        items
+                            .get(idx as usize)
                             .cloned()
-                            .ok_or_else(|| anyhow!("Key not found: {}", key))?)
+                            .ok_or_else(|| anyhow!("List index out of range"))
                     }
-                    PyObject::String(s) => {
-                        let i = index
-                            .as_int()
-                            .ok_or_else(|| anyhow!("Index must be an integer"))?;
-                        let char = s
-                            .chars()
-                            .nth(*i as usize)
-                            .ok_or_else(|| anyhow!("Index out of range"))?;
-                        Ok(PyObject::String(char.to_string()))
+                    (PyObject::List(l), PyObject::Slice { start, stop, step }) => {
+                        let items = l.borrow();
+                        let len = items.len() as i64;
+
+                        let step_val = match step.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => 1,
+                            _ => return Err(anyhow!("slice step must be an integer")),
+                        };
+                        if step_val == 0 {
+                            return Err(anyhow!("slice step cannot be zero"));
+                        }
+
+                        let mut start_val = match start.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => {
+                                if step_val > 0 {
+                                    0
+                                } else {
+                                    len - 1
+                                }
+                            }
+                            _ => return Err(anyhow!("slice start must be an integer")),
+                        };
+
+                        let mut stop_val = match stop.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => {
+                                if step_val > 0 {
+                                    len
+                                } else {
+                                    -1
+                                }
+                            }
+                            _ => return Err(anyhow!("slice stop must be an integer")),
+                        };
+
+                        if start_val < 0 {
+                            start_val += len;
+                        }
+                        if stop_val < 0 && stop.is_some() {
+                            stop_val += len;
+                        }
+
+                        let mut result = Vec::new();
+                        let mut curr = start_val;
+                        if step_val > 0 {
+                            while curr < stop_val && curr < len {
+                                if curr >= 0 {
+                                    result.push(items[curr as usize].clone());
+                                }
+                                curr += step_val;
+                            }
+                        } else {
+                            while curr > stop_val && curr >= 0 {
+                                if curr < len {
+                                    result.push(items[curr as usize].clone());
+                                }
+                                curr += step_val;
+                            }
+                        }
+                        Ok(PyObject::List(Rc::new(RefCell::new(result))))
+                    }
+                    (PyObject::String(s), PyObject::Int(i)) => {
+                        let mut idx = i;
+                        if idx < 0 {
+                            idx += s.len() as i64;
+                        }
+                        s.chars()
+                            .nth(idx as usize)
+                            .map(|c| PyObject::String(c.to_string()))
+                            .ok_or_else(|| anyhow!("String index out of range"))
+                    }
+                    (PyObject::String(s), PyObject::Slice { start, stop, step }) => {
+                        let len = s.len() as i64;
+                        let step_val = match step.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => 1,
+                            _ => return Err(anyhow!("slice step must be an integer")),
+                        };
+                        if step_val == 0 {
+                            return Err(anyhow!("slice step cannot be zero"));
+                        }
+
+                        let mut start_val = match start.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => {
+                                if step_val > 0 {
+                                    0
+                                } else {
+                                    len - 1
+                                }
+                            }
+                            _ => return Err(anyhow!("slice start must be an integer")),
+                        };
+
+                        let mut stop_val = match stop.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => {
+                                if step_val > 0 {
+                                    len
+                                } else {
+                                    -1
+                                }
+                            }
+                            _ => return Err(anyhow!("slice stop must be an integer")),
+                        };
+
+                        if start_val < 0 {
+                            start_val += len;
+                        }
+                        if stop_val < 0 && stop.is_some() {
+                            stop_val += len;
+                        }
+
+                        let mut result = String::new();
+                        let mut curr = start_val;
+                        let chars: Vec<char> = s.chars().collect();
+                        if step_val > 0 {
+                            while curr < stop_val && curr < len {
+                                if curr >= 0 {
+                                    result.push(chars[curr as usize]);
+                                }
+                                curr += step_val;
+                            }
+                        } else {
+                            while curr > stop_val && curr >= 0 {
+                                if curr < len {
+                                    result.push(chars[curr as usize]);
+                                }
+                                curr += step_val;
+                            }
+                        }
+                        Ok(PyObject::String(result))
+                    }
+                    (PyObject::Dict(d), key) => {
+                        let key_str = key.to_string();
+                        d.borrow()
+                            .get(&key_str)
+                            .cloned()
+                            .ok_or_else(|| anyhow!("Key '{}' not found in dictionary", key_str))
                     }
                     _ => Err(anyhow!("Object is not subscriptable")),
-                }
+                }?;
+                Ok(res)
             }
             Expr::Attribute(target, attr) => {
                 let val = self.eval_expression(target, env.clone())?;
                 match val {
-                    PyObject::Instance { class, attributes } => {
-                        if let Some(v) = attributes.borrow().get(attr) {
-                            return Ok(v.clone());
+                    PyObject::Instance {
+                        ref class,
+                        ref attributes,
+                    } => {
+                        if let Some(attr_val) = attributes.borrow().get(attr) {
+                            return Ok(attr_val.clone());
                         }
-                        let class_borrow = class.borrow();
-                        if let Some(method) = self.find_method(&class_borrow, attr) {
+                        if let Some(method) = self.find_method(&class.borrow(), attr) {
                             return Ok(method);
                         }
-                        Err(anyhow!("Attribute '{}' not found", attr))
+                        Err(anyhow!("Attribute '{}' not found on instance", attr))
                     }
                     PyObject::Class { .. } => {
                         if let Some(method) = self.find_method(&val, attr) {
@@ -420,20 +819,70 @@ impl Evaluator {
                         }
                         Err(anyhow!("Attribute '{}' not found on class", attr))
                     }
-                    PyObject::List(l) => {
-                        if attr == "push" {
-                            let l_clone = l.clone();
-                            return Ok(PyObject::BuiltinFunction(Rc::new(move |args| {
-                                if let Some(val) = args.first() {
-                                    l_clone.borrow_mut().push(val.clone());
-                                }
-                                PyObject::None
-                            })));
+                    PyObject::Module { ref name, ref env } => {
+                        if let Some(v) = env.borrow().get(attr) {
+                            return Ok(v.clone());
                         }
-                        Err(anyhow!("List has no attribute '{}'", attr))
+                        Err(anyhow!("Module '{}' has no attribute '{}'", name, attr))
                     }
-                    _ => Err(anyhow!("Object has no attributes")),
+                    _ => Err(anyhow!("Object has no attributes: {:?}", val)),
                 }
+            }
+            Expr::ListComprehension {
+                expression,
+                target,
+                iterable,
+                condition,
+            } => {
+                let iter_val = self.eval_expression(iterable, env.clone())?;
+                let items = match iter_val {
+                    PyObject::List(l) => l.borrow().clone(),
+                    _ => return Err(anyhow!("Object is not iterable")),
+                };
+
+                let mut results = Vec::new();
+                for item in items {
+                    let mut comp_env = Environment::with_parent(env.clone());
+                    comp_env.define(target.clone(), item);
+                    let rc_comp_env = Rc::new(RefCell::new(comp_env));
+
+                    let mut should_add = true;
+                    if let Some(cond) = condition {
+                        let cond_val = self.eval_expression(cond, rc_comp_env.clone())?;
+                        if !self.is_truthy(&cond_val) {
+                            should_add = false;
+                        }
+                    }
+
+                    if should_add {
+                        results.push(self.eval_expression(expression, rc_comp_env)?);
+                    }
+                }
+                Ok(PyObject::List(Rc::new(RefCell::new(results))))
+            }
+            Expr::Lambda { params, body } => Ok(PyObject::Function {
+                name: "<lambda>".to_string(),
+                params: params.clone(),
+                body: vec![Stmt::Return(Some(*body.clone()))],
+            }),
+            Expr::Slice { start, stop, step } => {
+                let s = start
+                    .as_ref()
+                    .map(|e| self.eval_expression(e, env.clone()))
+                    .transpose()?;
+                let p = stop
+                    .as_ref()
+                    .map(|e| self.eval_expression(e, env.clone()))
+                    .transpose()?;
+                let t = step
+                    .as_ref()
+                    .map(|e| self.eval_expression(e, env.clone()))
+                    .transpose()?;
+                Ok(PyObject::Slice {
+                    start: s.map(Box::new),
+                    stop: p.map(Box::new),
+                    step: t.map(Box::new),
+                })
             }
         }
     }
@@ -462,7 +911,18 @@ impl Evaluator {
                 BinaryOp::Add => Ok(PyObject::Int(l + r)),
                 BinaryOp::Sub => Ok(PyObject::Int(l - r)),
                 BinaryOp::Mul => Ok(PyObject::Int(l * r)),
-                BinaryOp::Div => Ok(PyObject::Int(l / r)),
+                BinaryOp::Div => {
+                    if r == 0 {
+                        return Err(anyhow!("ZeroDivisionError: division by zero"));
+                    }
+                    Ok(PyObject::Int(l / r))
+                }
+                BinaryOp::Mod => {
+                    if r == 0 {
+                        return Err(anyhow!("ZeroDivisionError: modulo by zero"));
+                    }
+                    Ok(PyObject::Int(l % r))
+                }
                 BinaryOp::Equal => Ok(PyObject::Bool(l == r)),
                 BinaryOp::NotEqual => Ok(PyObject::Bool(l != r)),
                 BinaryOp::Less => Ok(PyObject::Bool(l < r)),
@@ -512,5 +972,20 @@ impl Evaluator {
             }
         }
         None
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool {
+        if child == parent {
+            return true;
+        }
+        if let PyObject::Class { bases, .. } = child {
+            for base in bases {
+                if self.is_subclass(base, parent) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }

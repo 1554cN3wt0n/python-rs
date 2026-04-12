@@ -1,0 +1,10 @@
+# Debugging Sugar
+
+class Dog:
+    def speak(self):
+        print("Woof!")
+
+d = Dog()
+print("type(d):", str(type(d)))
+print("isinstance(d, Dog):", isinstance(d, Dog))
+print("hasattr(d, 'speak'):", hasattr(d, "speak"))

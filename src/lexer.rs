@@ -33,6 +33,16 @@ pub enum RawToken {
     In,
     #[token("class")]
     Class,
+    #[token("lambda")]
+    Lambda,
+    #[token("try")]
+    Try,
+    #[token("except")]
+    Except,
+    #[token("as")]
+    As,
+    #[token("import")]
+    Import,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
@@ -56,8 +66,12 @@ pub enum RawToken {
     Multiply,
     #[token("/")]
     Divide,
+    #[token("%")]
+    Percent,
     #[token("==")]
     Equal,
+    #[token(":")]
+    Colon,
     #[token("!=")]
     NotEqual,
     #[token("<")]
@@ -73,8 +87,6 @@ pub enum RawToken {
     LParen,
     #[token(")")]
     RParen,
-    #[token(":")]
-    Colon,
     #[token(",")]
     Comma,
     #[token("[")]

@@ -1,0 +1,36 @@
+# Phase 1: Sugar & Introspection Verification
+
+print("--- Introspection ---")
+class Animal:
+    def speak(self):
+        print("...")
+
+class Dog(Animal):
+    def speak(self):
+        print("Woof!")
+
+d = Dog()
+print("type(d):", str(type(d)))
+print("isinstance(d, Dog):", isinstance(d, Dog))
+print("isinstance(d, Animal):", isinstance(d, Animal))
+print("isinstance(d, list):", isinstance(d, list))
+
+print("hasattr(d, 'speak'):", hasattr(d, "speak"))
+print("hasattr(d, 'bark'):", hasattr(d, "bark"))
+
+print("--- List Comprehensions ---")
+nums = [1, 2, 3, 4, 5]
+squares = [x * x for x in nums]
+print("Squares:", squares)
+
+evens = [x for x in nums if x % 2 == 0]
+print("Evens:", evens)
+
+print("--- Lambdas ---")
+add = lambda a, b: a + b
+print("add(5, 3):", add(5, 3))
+
+# Composite test
+print("Lambdas + Comprehensions:")
+complex_list = [ (lambda x: x*2)(i) for i in range(5) if i > 0 ]
+print(complex_list)

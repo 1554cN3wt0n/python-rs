@@ -1,0 +1,19 @@
+# Phase 3: Systems & Ecosystem Verification
+
+print("--- Imports ---")
+import math_utils
+
+print("math_utils.PI:", math_utils.PI)
+print("math_utils.square(4):", math_utils.square(4))
+print("math_utils.add(10, 5):", math_utils.add(10, 5))
+
+print("--- File I/O ---")
+# Note: In our current impl, f.write() writes the entire file
+f = open("pyrs_test.txt")
+print("Writing to file...")
+f.write("Hello from the extended PyRS interpreter!\nPhase 3 is working.")
+
+print("Reading from file...")
+content = f.read()
+print("Content:")
+print(content)

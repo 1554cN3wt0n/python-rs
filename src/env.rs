@@ -39,6 +39,10 @@ impl Environment {
         None
     }
 
+    pub fn values(&self) -> HashMap<String, PyObject> {
+        self.values.clone()
+    }
+
     #[allow(dead_code)]
     pub fn assign(&mut self, name: String, value: PyObject) -> bool {
         if let Some(v) = self.values.get_mut(&name) {
