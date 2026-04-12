@@ -229,12 +229,14 @@ impl Parser {
                 | Token::Raw(RawToken::LessEqual)
                 | Token::Raw(RawToken::Greater)
                 | Token::Raw(RawToken::GreaterEqual)
+                | Token::Raw(RawToken::In)
         ) {
             let op = match self.lexer.next() {
                 Token::Raw(RawToken::Less) => BinaryOp::Less,
                 Token::Raw(RawToken::LessEqual) => BinaryOp::LessEqual,
                 Token::Raw(RawToken::Greater) => BinaryOp::Greater,
                 Token::Raw(RawToken::GreaterEqual) => BinaryOp::GreaterEqual,
+                Token::Raw(RawToken::In) => BinaryOp::In,
                 _ => unreachable!(),
             };
             let right = self.parse_term()?;

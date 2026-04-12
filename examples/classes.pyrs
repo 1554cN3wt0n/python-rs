@@ -1,0 +1,78 @@
+# Bank Management System Example
+
+class Account:
+    def __init__(self, owner, balance):
+        self.owner = owner
+        self.balance = balance
+        self.transactions = []
+
+    def deposit(self, amount):
+        self.balance = self.balance + amount
+        self.transactions.push("Deposit: " + str(amount))
+        print("Deposited", amount, "to", self.owner, "account")
+
+    def withdraw(self, amount):
+        if self.balance >= amount:
+            self.balance = self.balance - amount
+            self.transactions.push("Withdraw: " + str(amount))
+            return True
+        else:
+            print("Insufficient funds for", self.owner)
+            return False
+
+    def get_summary(self):
+        print("Account Owner:", self.owner)
+        print("Balance:", self.balance)
+
+class Bank:
+    def __init__(self, name):
+        self.name = name
+        self.accounts = {}
+
+    def open_account(self, owner, initial_balance):
+        new_account = Account(owner, initial_balance)
+        self.accounts[owner] = new_account
+        print("Opened account for", owner, "at", self.name)
+
+    def get_account(self, owner):
+        return self.accounts[owner]
+
+    def total_liquidity(self):
+        total = 0
+        # In our version, we iterate over keys to get accounts
+        # Note: We'll manually manage the list of owners for now
+        owners = ["Alice", "Bob", "Charlie"]
+        for owner in owners:
+            if owner in self.accounts:
+                acc = self.accounts[owner]
+                total = total + acc.balance
+        return total
+
+# Initialization
+print("Initializing Bank System...")
+my_bank = Bank("Global Reserve")
+
+my_bank.open_account("Alice", 1000)
+my_bank.open_account("Bob", 500)
+
+# Operations
+alice_acc = my_bank.get_account("Alice")
+bob_acc = my_bank.get_account("Bob")
+
+print("--- Transactions ---")
+alice_acc.deposit(200)
+
+if alice_acc.withdraw(150):
+    print("Alice successfully withdrew 150")
+
+bob_acc.deposit(1000)
+
+print("--- Bank Summary ---")
+alice_acc.get_summary()
+bob_acc.get_summary()
+
+# We can even use logical operators to check status
+if alice_acc.balance > 1000 and bob_acc.balance > 1000:
+    print("All VIP accounts are healthy")
+else:
+    print("System check: One or more accounts below VIP status")

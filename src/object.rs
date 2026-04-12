@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-#[derive(Debug, Clone, PartialEq, EnumAsInner)]
-#[allow(unpredictable_function_pointer_comparisons)]
+#[derive(Clone, EnumAsInner)]
 pub enum PyObject {
     Int(i64),
     String(String),
@@ -18,7 +17,7 @@ pub enum PyObject {
         params: Vec<String>,
         body: Vec<Stmt>,
     },
-    BuiltinFunction(fn(Vec<PyObject>) -> PyObject),
+    BuiltinFunction(Rc<dyn Fn(Vec<PyObject>) -> PyObject>),
     Class {
         name: String,
         methods: HashMap<String, PyObject>,
@@ -28,6 +27,54 @@ pub enum PyObject {
         attributes: Rc<RefCell<HashMap<String, PyObject>>>,
     },
     None,
+}
+
+impl fmt::Debug for PyObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PyObject::Int(n) => f.debug_tuple("Int").field(n).finish(),
+            PyObject::String(s) => f.debug_tuple("String").field(s).finish(),
+            PyObject::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            PyObject::List(l) => f.debug_tuple("List").field(l).finish(),
+            PyObject::Dict(d) => f.debug_tuple("Dict").field(d).finish(),
+            PyObject::Function { name, .. } => f
+                .debug_struct("Function")
+                .field("name", name)
+                .finish_non_exhaustive(),
+            PyObject::BuiltinFunction(_) => f.debug_tuple("BuiltinFunction").finish(),
+            PyObject::Class { name, .. } => f
+                .debug_struct("Class")
+                .field("name", name)
+                .finish_non_exhaustive(),
+            PyObject::Instance { .. } => f.debug_struct("Instance").finish_non_exhaustive(),
+            PyObject::None => write!(f, "None"),
+        }
+    }
+}
+
+impl PartialEq for PyObject {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PyObject::Int(a), PyObject::Int(b)) => a == b,
+            (PyObject::String(a), PyObject::String(b)) => a == b,
+            (PyObject::Bool(a), PyObject::Bool(b)) => a == b,
+            (PyObject::List(a), PyObject::List(b)) => {
+                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
+            }
+            (PyObject::Dict(a), PyObject::Dict(b)) => {
+                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
+            }
+            (PyObject::Function { name: a, .. }, PyObject::Function { name: b, .. }) => a == b,
+            (PyObject::BuiltinFunction(a), PyObject::BuiltinFunction(b)) => Rc::ptr_eq(a, b),
+            (PyObject::Class { name: a, .. }, PyObject::Class { name: b, .. }) => a == b,
+            (
+                PyObject::Instance { attributes: a, .. },
+                PyObject::Instance { attributes: b, .. },
+            ) => Rc::ptr_eq(a, b),
+            (PyObject::None, PyObject::None) => true,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for PyObject {

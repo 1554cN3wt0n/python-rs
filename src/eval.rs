@@ -17,7 +17,7 @@ impl Evaluator {
         // Register built-ins
         global_env.borrow_mut().define(
             "print".to_string(),
-            PyObject::BuiltinFunction(|args| {
+            PyObject::BuiltinFunction(Rc::new(|args| {
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         print!(" ");
@@ -26,12 +26,12 @@ impl Evaluator {
                 }
                 println!();
                 PyObject::None
-            }),
+            })),
         );
 
         global_env.borrow_mut().define(
             "len".to_string(),
-            PyObject::BuiltinFunction(|args| {
+            PyObject::BuiltinFunction(Rc::new(|args| {
                 if args.len() != 1 {
                     return PyObject::None; // Should ideally be an error
                 }
@@ -41,12 +41,12 @@ impl Evaluator {
                     PyObject::Dict(d) => PyObject::Int(d.borrow().len() as i64),
                     _ => PyObject::None,
                 }
-            }),
+            })),
         );
 
         global_env.borrow_mut().define(
             "range".to_string(),
-            PyObject::BuiltinFunction(|args| {
+            PyObject::BuiltinFunction(Rc::new(|args| {
                 let (start, stop) = match args.len() {
                     1 => (0, args[0].as_int().cloned().unwrap_or(0)),
                     2 => (
@@ -60,7 +60,17 @@ impl Evaluator {
                     items.push(PyObject::Int(i));
                 }
                 PyObject::List(Rc::new(RefCell::new(items)))
-            }),
+            })),
+        );
+
+        global_env.borrow_mut().define(
+            "str".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|args| {
+                if args.len() != 1 {
+                    return PyObject::None;
+                }
+                PyObject::String(args[0].to_string())
+            })),
         );
 
         Self { global_env }
@@ -406,6 +416,18 @@ impl Evaluator {
                         }
                         Err(anyhow!("Attribute '{}' not found", attr))
                     }
+                    PyObject::List(l) => {
+                        if attr == "push" {
+                            let l_clone = l.clone();
+                            return Ok(PyObject::BuiltinFunction(Rc::new(move |args| {
+                                if let Some(val) = args.first() {
+                                    l_clone.borrow_mut().push(val.clone());
+                                }
+                                PyObject::None
+                            })));
+                        }
+                        Err(anyhow!("List has no attribute '{}'", attr))
+                    }
                     _ => Err(anyhow!("Object has no attributes")),
                 }
             }
@@ -413,6 +435,24 @@ impl Evaluator {
     }
 
     fn eval_binary_op(&self, left: PyObject, op: &BinaryOp, right: PyObject) -> Result<PyObject> {
+        if let BinaryOp::In = op {
+            return match right {
+                PyObject::List(l) => {
+                    let borrow = l.borrow();
+                    Ok(PyObject::Bool(borrow.contains(&left)))
+                }
+                PyObject::Dict(d) => {
+                    let key = left.to_string();
+                    let borrow = d.borrow();
+                    Ok(PyObject::Bool(borrow.contains_key(&key)))
+                }
+                PyObject::String(s) => {
+                    let sub = left.to_string();
+                    Ok(PyObject::Bool(s.contains(&sub)))
+                }
+                _ => Err(anyhow!("Object of type {:?} is not iterable", right)),
+            };
+        }
         match (left, right) {
             (PyObject::Int(l), PyObject::Int(r)) => match op {
                 BinaryOp::Add => Ok(PyObject::Int(l + r)),
@@ -425,16 +465,19 @@ impl Evaluator {
                 BinaryOp::Greater => Ok(PyObject::Bool(l > r)),
                 BinaryOp::LessEqual => Ok(PyObject::Bool(l <= r)),
                 BinaryOp::GreaterEqual => Ok(PyObject::Bool(l >= r)),
+                BinaryOp::In => unreachable!(),
             },
             (PyObject::String(l), PyObject::String(r)) => match op {
                 BinaryOp::Add => Ok(PyObject::String(format!("{}{}", l, r))),
                 BinaryOp::Equal => Ok(PyObject::Bool(l == r)),
                 BinaryOp::NotEqual => Ok(PyObject::Bool(l != r)),
+                BinaryOp::In => unreachable!(),
                 _ => Err(anyhow!("Invalid operator for strings")),
             },
             (l, r) => match op {
                 BinaryOp::Equal => Ok(PyObject::Bool(l == r)),
                 BinaryOp::NotEqual => Ok(PyObject::Bool(l != r)),
+                BinaryOp::In => unreachable!(),
                 _ => Err(anyhow!("Unsupported types for operation")),
             },
         }
