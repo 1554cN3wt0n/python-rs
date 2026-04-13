@@ -3,7 +3,7 @@ use crate::env::Environment;
 use crate::object::PyObject;
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub struct Evaluator {
@@ -68,6 +68,7 @@ impl Evaluator {
                     PyObject::String(s) => Ok(PyObject::Int(s.len() as i64)),
                     PyObject::List(l) => Ok(PyObject::Int(l.borrow().len() as i64)),
                     PyObject::Dict(d) => Ok(PyObject::Int(d.borrow().len() as i64)),
+                    PyObject::Set(s) => Ok(PyObject::Int(s.borrow().len() as i64)),
                     _ => {
                         if let Ok(res) = ctx.call_method(&args[0], "__len__", vec![args[0].clone()])
                         {
@@ -138,6 +139,7 @@ impl Evaluator {
                     }
                     PyObject::Iterator(_) => PyObject::String("iterator".to_string()),
                     PyObject::Tuple(_) => PyObject::String("tuple".to_string()),
+                    PyObject::Set(_) => PyObject::String("set".to_string()),
                     PyObject::None => PyObject::String("NoneType".to_string()),
                 })
             })),
@@ -216,6 +218,31 @@ impl Evaluator {
         global_env
             .borrow_mut()
             .define("dict".to_string(), PyObject::Type("dict".to_string()));
+        global_env.borrow_mut().define(
+            "Exception".to_string(),
+            PyObject::Type("Exception".to_string()),
+        );
+        global_env.borrow_mut().define(
+            "set".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                if args.is_empty() {
+                    return Ok(PyObject::Set(Rc::new(RefCell::new(HashSet::new()))));
+                }
+                let it_rc = args[0]
+                    .to_iterator()
+                    .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", args[0]))?;
+                let mut it = it_rc.borrow_mut();
+                let mut set = HashSet::new();
+                while let Some(item) = it.next() {
+                    if !item.is_hashable() {
+                        return Err(anyhow!("TypeError: unhashable type: '{:?}'", item));
+                    }
+                    set.insert(item);
+                }
+                Ok(PyObject::Set(Rc::new(RefCell::new(set))))
+            })),
+        );
+
         global_env.borrow_mut().define(
             "NoneType".to_string(),
             PyObject::Type("NoneType".to_string()),
@@ -809,6 +836,7 @@ def filter(f, it):
                                 PyObject::String(s) => Ok(PyObject::Int(s.parse().unwrap_or(0))),
                                 _ => Err(anyhow!("Could not convert to int")),
                             },
+                            "bool" => Ok(PyObject::Bool(self.is_truthy(&evaluated_args[0]))),
                             _ => Err(anyhow!("Constructor not implemented for type {}", name)),
                         }
                     }
@@ -1079,6 +1107,17 @@ def filter(f, it):
                 }?;
                 Ok(res)
             }
+            Expr::Set(items) => {
+                let mut evaluated_items = HashSet::new();
+                for item_expr in items {
+                    let item = self.eval_expression(item_expr, env.clone())?;
+                    if !item.is_hashable() {
+                        return Err(anyhow!("TypeError: unhashable type"));
+                    }
+                    evaluated_items.insert(item);
+                }
+                Ok(PyObject::Set(Rc::new(RefCell::new(evaluated_items))))
+            }
             Expr::Attribute(target, attr) => {
                 let val = self.eval_expression(target, env.clone())?;
                 match val {
@@ -1239,6 +1278,9 @@ def filter(f, it):
             BinaryOp::LessEqual => Some("__le__"),
             BinaryOp::GreaterEqual => Some("__ge__"),
             BinaryOp::In => Some("__contains__"),
+            BinaryOp::BitwiseAnd => Some("__and__"),
+            BinaryOp::BitwiseOr => Some("__or__"),
+            BinaryOp::BitwiseXor => Some("__xor__"),
         };
 
         if let Some(name) = dunder {
@@ -1268,6 +1310,12 @@ def filter(f, it):
                     let sub = left.to_string();
                     Ok(PyObject::Bool(s.contains(&sub)))
                 }
+                PyObject::Set(s) => {
+                    if !left.is_hashable() {
+                        return Err(anyhow!("TypeError: unhashable type"));
+                    }
+                    Ok(PyObject::Bool(s.borrow().contains(&left)))
+                }
                 _ => Err(anyhow!("Object of type {:?} is not iterable", right)),
             };
         }
@@ -1294,6 +1342,9 @@ def filter(f, it):
                 BinaryOp::Greater => Ok(PyObject::Bool(l > r)),
                 BinaryOp::LessEqual => Ok(PyObject::Bool(l <= r)),
                 BinaryOp::GreaterEqual => Ok(PyObject::Bool(l >= r)),
+                BinaryOp::BitwiseAnd => Ok(PyObject::Int(l & r)),
+                BinaryOp::BitwiseOr => Ok(PyObject::Int(l | r)),
+                BinaryOp::BitwiseXor => Ok(PyObject::Int(l ^ r)),
                 BinaryOp::In => unreachable!(),
             },
             (PyObject::String(l), PyObject::String(r)) => match op {
@@ -1303,6 +1354,31 @@ def filter(f, it):
                 BinaryOp::In => unreachable!(),
                 _ => Err(anyhow!("Invalid operator for strings")),
             },
+            (PyObject::Set(l), PyObject::Set(r)) => {
+                let s1 = l.borrow();
+                let s2 = r.borrow();
+                match op {
+                    BinaryOp::BitwiseOr => {
+                        let res: HashSet<_> = s1.union(&s2).cloned().collect();
+                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                    }
+                    BinaryOp::BitwiseAnd => {
+                        let res: HashSet<_> = s1.intersection(&s2).cloned().collect();
+                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                    }
+                    BinaryOp::Sub => {
+                        let res: HashSet<_> = s1.difference(&s2).cloned().collect();
+                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                    }
+                    BinaryOp::BitwiseXor => {
+                        let res: HashSet<_> = s1.symmetric_difference(&s2).cloned().collect();
+                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                    }
+                    BinaryOp::Equal => Ok(PyObject::Bool(*s1 == *s2)),
+                    BinaryOp::NotEqual => Ok(PyObject::Bool(*s1 != *s2)),
+                    _ => Err(anyhow!("Unsupported operator for sets")),
+                }
+            }
             (l, r) => match op {
                 BinaryOp::Equal => Ok(PyObject::Bool(l == r)),
                 BinaryOp::NotEqual => Ok(PyObject::Bool(l != r)),
@@ -1320,6 +1396,7 @@ def filter(f, it):
             PyObject::String(s) => !s.is_empty(),
             PyObject::List(l) => !l.borrow().is_empty(),
             PyObject::Dict(d) => !d.borrow().is_empty(),
+            PyObject::Set(s) => !s.borrow().is_empty(),
             _ => true,
         }
     }

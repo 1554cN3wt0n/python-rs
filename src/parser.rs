@@ -365,7 +365,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_term()?;
+        let mut expr = self.parse_bitwise_or()?;
         while matches!(
             self.lexer.peek(),
             Token::Raw(RawToken::Less)
@@ -382,8 +382,38 @@ impl Parser {
                 Token::Raw(RawToken::In) => BinaryOp::In,
                 _ => unreachable!(),
             };
-            let right = self.parse_term()?;
+            let right = self.parse_bitwise_or()?;
             expr = Expr::Binary(Box::new(expr), op, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_or(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_bitwise_xor()?;
+        while self.lexer.peek() == Token::Raw(RawToken::BitwiseOr) {
+            self.lexer.next();
+            let right = self.parse_bitwise_xor()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::BitwiseOr, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_bitwise_and()?;
+        while self.lexer.peek() == Token::Raw(RawToken::BitwiseXor) {
+            self.lexer.next();
+            let right = self.parse_bitwise_and()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::BitwiseXor, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_and(&mut self) -> Result<Expr> {
+        let mut expr = self.parse_term()?;
+        while self.lexer.peek() == Token::Raw(RawToken::BitwiseAnd) {
+            self.lexer.next();
+            let right = self.parse_term()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::BitwiseAnd, Box::new(right));
         }
         Ok(expr)
     }
@@ -522,22 +552,42 @@ impl Parser {
                 Ok(Expr::List(items))
             }
             Token::Raw(RawToken::LBrace) => {
-                let mut items = Vec::new();
-                if self.lexer.peek() != Token::Raw(RawToken::RBrace) {
-                    loop {
-                        let key = self.parse_single_expression()?;
-                        self.expect(Token::Raw(RawToken::Colon))?;
-                        let val = self.parse_single_expression()?;
-                        items.push((key, val));
-                        if self.lexer.peek() == Token::Raw(RawToken::Comma) {
-                            self.lexer.next();
-                        } else {
+                if self.lexer.peek() == Token::Raw(RawToken::RBrace) {
+                    self.lexer.next();
+                    return Ok(Expr::Dict(Vec::new()));
+                }
+
+                let first = self.parse_single_expression()?;
+                if self.lexer.peek() == Token::Raw(RawToken::Colon) {
+                    // It's a dictionary
+                    self.lexer.next();
+                    let val = self.parse_single_expression()?;
+                    let mut items = vec![(first, val)];
+                    while self.lexer.peek() == Token::Raw(RawToken::Comma) {
+                        self.lexer.next();
+                        if self.lexer.peek() == Token::Raw(RawToken::RBrace) {
                             break;
                         }
+                        let k = self.parse_single_expression()?;
+                        self.expect(Token::Raw(RawToken::Colon))?;
+                        let v = self.parse_single_expression()?;
+                        items.push((k, v));
                     }
+                    self.expect(Token::Raw(RawToken::RBrace))?;
+                    Ok(Expr::Dict(items))
+                } else {
+                    // It's a set
+                    let mut items = vec![first];
+                    while self.lexer.peek() == Token::Raw(RawToken::Comma) {
+                        self.lexer.next();
+                        if self.lexer.peek() == Token::Raw(RawToken::RBrace) {
+                            break;
+                        }
+                        items.push(self.parse_single_expression()?);
+                    }
+                    self.expect(Token::Raw(RawToken::RBrace))?;
+                    Ok(Expr::Set(items))
                 }
-                self.expect(Token::Raw(RawToken::RBrace))?;
-                Ok(Expr::Dict(items))
             }
             Token::Raw(RawToken::Identifier(id)) => Ok(Expr::Variable(id)),
             Token::Raw(RawToken::LParen) => {

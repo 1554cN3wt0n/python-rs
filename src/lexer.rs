@@ -89,6 +89,13 @@ pub enum RawToken {
     #[token(">=")]
     GreaterEqual,
 
+    #[token("|")]
+    BitwiseOr,
+    #[token("&")]
+    BitwiseAnd,
+    #[token("^")]
+    BitwiseXor,
+
     #[token("(")]
     LParen,
     #[token(")")]

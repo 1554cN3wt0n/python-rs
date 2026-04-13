@@ -27,6 +27,7 @@ pub enum Expr {
     },
     FString(Vec<FStringPart>),
     Tuple(Vec<Expr>),
+    Set(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +72,9 @@ pub enum BinaryOp {
     LessEqual,
     GreaterEqual,
     In,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
 }
 
 #[derive(Debug, Clone, PartialEq)]

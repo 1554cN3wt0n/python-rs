@@ -113,6 +113,9 @@ impl Codegen {
                     BinaryOp::LessEqual => self.builder.push_op(WasmOp::I32LeS),
                     BinaryOp::GreaterEqual => self.builder.push_op(WasmOp::I32GeS),
                     BinaryOp::In => todo!("In operator not supported in codegen yet"),
+                    BinaryOp::BitwiseAnd => self.builder.push_op(WasmOp::I32And),
+                    BinaryOp::BitwiseOr => self.builder.push_op(WasmOp::I32Or),
+                    BinaryOp::BitwiseXor => self.builder.push_op(WasmOp::I32Xor),
                 }
             }
             _ => todo!("Expression type not supported in codegen yet"),

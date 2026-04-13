@@ -1,8 +1,9 @@
 use crate::ast::Stmt;
 use enum_as_inner::EnumAsInner;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 pub trait PyCallableContext {
@@ -27,6 +28,7 @@ pub enum PyObject {
     List(Rc<RefCell<Vec<PyObject>>>),
     Tuple(Vec<PyObject>),
     Dict(Rc<RefCell<HashMap<String, PyObject>>>),
+    Set(Rc<RefCell<HashSet<PyObject>>>),
     Function {
         name: String,
         params: Vec<String>,
@@ -108,6 +110,7 @@ impl fmt::Debug for PyObject {
             PyObject::List(l) => f.debug_tuple("List").field(l).finish(),
             PyObject::Tuple(t) => f.debug_tuple("Tuple").field(t).finish(),
             PyObject::Dict(d) => f.debug_tuple("Dict").field(d).finish(),
+            PyObject::Set(s) => f.debug_tuple("Set").field(s).finish(),
             PyObject::Function { name, .. } => f
                 .debug_struct("Function")
                 .field("name", name)
@@ -141,9 +144,11 @@ impl PartialEq for PyObject {
             (PyObject::List(a), PyObject::List(b)) => {
                 Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
             }
+            (PyObject::Tuple(a), PyObject::Tuple(b)) => a == b,
             (PyObject::Dict(a), PyObject::Dict(b)) => {
                 Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
             }
+            (PyObject::Set(a), PyObject::Set(b)) => Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow(),
             (PyObject::Function { name: a, .. }, PyObject::Function { name: b, .. }) => a == b,
             (PyObject::BuiltinFunction(a), PyObject::BuiltinFunction(b)) => Rc::ptr_eq(a, b),
             (PyObject::Class { name: a, .. }, PyObject::Class { name: b, .. }) => a == b,
@@ -163,6 +168,57 @@ impl PartialEq for PyObject {
             (PyObject::Iterator(a), PyObject::Iterator(b)) => Rc::ptr_eq(a, b),
             (PyObject::None, PyObject::None) => true,
             _ => false,
+        }
+    }
+}
+
+impl Eq for PyObject {}
+
+impl Hash for PyObject {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            PyObject::Int(n) => {
+                0u8.hash(state);
+                n.hash(state);
+            }
+            PyObject::String(s) => {
+                1u8.hash(state);
+                s.hash(state);
+            }
+            PyObject::Bool(b) => {
+                2u8.hash(state);
+                b.hash(state);
+            }
+            PyObject::None => {
+                3u8.hash(state);
+            }
+            PyObject::Tuple(items) => {
+                4u8.hash(state);
+                for item in items {
+                    item.hash(state);
+                }
+            }
+            PyObject::Type(s) => {
+                5u8.hash(state);
+                s.hash(state);
+            }
+            PyObject::Class { name, .. } => {
+                6u8.hash(state);
+                name.hash(state);
+            }
+            PyObject::Function { name, .. } => {
+                7u8.hash(state);
+                name.hash(state);
+            }
+            PyObject::BuiltinFunction(_) => {
+                8u8.hash(state);
+                // Hash by address if we could, but let's just use a placeholder
+            }
+            _ => {
+                // Unhashable types should be checked before calling hash()
+                // In Python, this raises TypeError. Here we might want to panic if reached,
+                // but we should ideally prevent this in the evaluator.
+            }
         }
     }
 }
@@ -207,6 +263,22 @@ impl fmt::Display for PyObject {
                     write!(f, "\"{}\": {}", k, v)?;
                 }
                 write!(f, "}}")
+            }
+            PyObject::Set(s) => {
+                write!(f, "{{")?;
+                let items = s.borrow();
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                if items.is_empty() {
+                    write!(f, "set()")?;
+                } else {
+                    write!(f, "}}")?;
+                }
+                Ok(())
             }
             PyObject::Function { name, .. } => write!(f, "<function {}>", name),
             PyObject::BuiltinFunction(_) => write!(f, "<built-in function>"),
@@ -255,8 +327,27 @@ impl PyObject {
                 0,
             )))),
             PyObject::String(s) => Some(Rc::new(RefCell::new(PyIterator::String(s.clone(), 0)))),
+            PyObject::Set(s) => Some(Rc::new(RefCell::new(PyIterator::List(
+                Rc::new(RefCell::new(s.borrow().iter().cloned().collect())),
+                0,
+            )))),
             PyObject::Iterator(it) => Some(it.clone()),
             _ => None,
+        }
+    }
+
+    pub fn is_hashable(&self) -> bool {
+        match self {
+            PyObject::Int(_)
+            | PyObject::String(_)
+            | PyObject::Bool(_)
+            | PyObject::None
+            | PyObject::Type(_)
+            | PyObject::Class { .. }
+            | PyObject::Function { .. }
+            | PyObject::BuiltinFunction(_) => true,
+            PyObject::Tuple(items) => items.iter().all(|item| item.is_hashable()),
+            _ => false,
         }
     }
 }

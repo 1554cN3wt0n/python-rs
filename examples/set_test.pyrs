@@ -1,0 +1,33 @@
+# Test set literals
+s1 = {1, 2, 3, 2, 1}
+print("s1 =", s1)
+print("len(s1) =", len(s1))
+
+# Test set() function
+s2 = set([3, 4, 5, 4])
+print("s2 =", s2)
+
+# Test set operations
+print("s1 | s2 =", s1 | s2)  # Union
+print("s1 & s2 =", s1 & s2)  # Intersection
+print("s1 - s2 =", s1 - s2)  # Difference
+print("s1 ^ s2 =", s1 ^ s2)  # Symmetric difference
+
+# Test membership
+print("2 in s1 =", 2 in s1)
+print("5 in s1 =", 5 in s1)
+
+# Test truthiness
+print("bool({1}) =", bool({1}))
+print("bool(set()) =", bool(set()))
+
+# Test hashability error
+try:
+    s3 = {[1], 2}
+except Exception as e:
+    print("Caught expected error:", e)
+
+# Test iteration
+print("Iterating over s1:")
+for x in s1:
+    print(x)
