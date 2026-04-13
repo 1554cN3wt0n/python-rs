@@ -11,6 +11,28 @@ pub struct Evaluator {
     load_paths: Rc<RefCell<Vec<String>>>,
 }
 
+impl crate::object::PyCallableContext for Evaluator {
+    fn call_method(
+        &mut self,
+        obj: &PyObject,
+        name: &str,
+        args: Vec<PyObject>,
+    ) -> anyhow::Result<PyObject> {
+        if let Some(method) = self.get_method(obj, name) {
+            return self.call_func(&method, args);
+        }
+        Err(anyhow!("Attribute '{}' not found on {:?}", name, obj))
+    }
+
+    fn call_func(&mut self, func: &PyObject, args: Vec<PyObject>) -> anyhow::Result<PyObject> {
+        self.call_pyfunc(func, args)
+    }
+
+    fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool {
+        self.is_subclass(child, parent)
+    }
+}
+
 impl Evaluator {
     pub fn new() -> Self {
         let global_env = Rc::new(RefCell::new(Environment::new()));
@@ -19,36 +41,47 @@ impl Evaluator {
         // Register built-ins
         global_env.borrow_mut().define(
             "print".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         print!(" ");
                     }
-                    print!("{}", arg);
+                    let s = if let Ok(res) = ctx.call_method(arg, "__str__", vec![arg.clone()]) {
+                        res.to_string()
+                    } else {
+                        arg.to_string()
+                    };
+                    print!("{}", s);
                 }
                 println!();
-                PyObject::None
+                Ok(PyObject::None)
             })),
         );
 
         global_env.borrow_mut().define(
             "len".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
                 if args.len() != 1 {
-                    return PyObject::None; // Should ideally be an error
+                    return Ok(PyObject::None);
                 }
                 match &args[0] {
-                    PyObject::String(s) => PyObject::Int(s.len() as i64),
-                    PyObject::List(l) => PyObject::Int(l.borrow().len() as i64),
-                    PyObject::Dict(d) => PyObject::Int(d.borrow().len() as i64),
-                    _ => PyObject::None,
+                    PyObject::String(s) => Ok(PyObject::Int(s.len() as i64)),
+                    PyObject::List(l) => Ok(PyObject::Int(l.borrow().len() as i64)),
+                    PyObject::Dict(d) => Ok(PyObject::Int(d.borrow().len() as i64)),
+                    _ => {
+                        if let Ok(res) = ctx.call_method(&args[0], "__len__", vec![args[0].clone()])
+                        {
+                            return Ok(res);
+                        }
+                        Ok(PyObject::None)
+                    }
                 }
             })),
         );
 
         global_env.borrow_mut().define(
             "range".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 let (start, stop, step) = match args.len() {
                     1 => (0, args[0].as_int().cloned().unwrap_or(0), 1),
                     2 => (
@@ -63,29 +96,32 @@ impl Evaluator {
                     ),
                     _ => (0, 0, 1),
                 };
-                PyObject::Iterator(Rc::new(RefCell::new(crate::object::PyIterator::Range(
-                    start, stop, step,
+                Ok(PyObject::Iterator(Rc::new(RefCell::new(
+                    crate::object::PyIterator::Range(start, stop, step),
                 ))))
             })),
         );
 
         global_env.borrow_mut().define(
             "str".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
                 if args.len() != 1 {
-                    return PyObject::None;
+                    return Ok(PyObject::None);
                 }
-                PyObject::String(args[0].to_string())
+                if let Ok(res) = ctx.call_method(&args[0], "__str__", vec![args[0].clone()]) {
+                    return Ok(res);
+                }
+                Ok(PyObject::String(args[0].to_string()))
             })),
         );
 
         global_env.borrow_mut().define(
             "type".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.len() != 1 {
-                    return PyObject::None;
+                    return Ok(PyObject::None);
                 }
-                match &args[0] {
+                Ok(match &args[0] {
                     PyObject::Int(_) => PyObject::String("int".to_string()),
                     PyObject::String(_) => PyObject::String("str".to_string()),
                     PyObject::Bool(_) => PyObject::String("bool".to_string()),
@@ -103,18 +139,65 @@ impl Evaluator {
                     PyObject::Iterator(_) => PyObject::String("iterator".to_string()),
                     PyObject::Tuple(_) => PyObject::String("tuple".to_string()),
                     PyObject::None => PyObject::String("NoneType".to_string()),
-                }
+                })
             })),
         );
 
         global_env.borrow_mut().define(
             "isinstance".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_| PyObject::None)),
+            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+                if args.len() == 2 {
+                    let obj = &args[0];
+                    let target_type = &args[1];
+
+                    match (obj, target_type) {
+                        (PyObject::Int(_), PyObject::Type(s)) if s == "int" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::String(_), PyObject::Type(s)) if s == "str" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::Bool(_), PyObject::Type(s)) if s == "bool" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::List(_), PyObject::Type(s)) if s == "list" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::Dict(_), PyObject::Type(s)) if s == "dict" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::None, PyObject::Type(s)) if s == "NoneType" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::Instance { class, .. }, _) => {
+                            return Ok(PyObject::Bool(
+                                ctx.is_subclass(&class.borrow(), target_type),
+                            ));
+                        }
+                        _ => return Ok(PyObject::Bool(false)),
+                    }
+                }
+                Ok(PyObject::Bool(false))
+            })),
         );
 
         global_env.borrow_mut().define(
             "hasattr".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_| PyObject::None)),
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                if args.len() == 2 {
+                    let obj = &args[0];
+                    let attr_name = args[1].to_string();
+                    match obj {
+                        PyObject::Instance { attributes, .. } => {
+                            return Ok(PyObject::Bool(
+                                attributes.borrow().contains_key(&attr_name),
+                            ));
+                        }
+                        _ => return Ok(PyObject::Bool(false)),
+                    }
+                }
+                Ok(PyObject::Bool(false))
+            })),
         );
 
         // Primitive type markers
@@ -142,9 +225,9 @@ impl Evaluator {
         let open_load_paths = load_paths.clone();
         global_env.borrow_mut().define(
             "open".to_string(),
-            PyObject::BuiltinFunction(Rc::new(move |args| {
+            PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::None;
+                    return Ok(PyObject::None);
                 }
                 let filename = args[0].to_string();
                 let inner_load_paths = open_load_paths.clone();
@@ -154,44 +237,44 @@ impl Evaluator {
 
                 attributes.insert(
                     "read".to_string(),
-                    PyObject::BuiltinFunction(Rc::new(move |_| {
+                    PyObject::BuiltinFunction(Rc::new(move |_ctx, _| {
                         for path in inner_load_paths.borrow().iter() {
                             let p = std::path::Path::new(path).join(&f_name_read);
                             if let Ok(content) = std::fs::read_to_string(p) {
-                                return PyObject::String(content);
+                                return Ok(PyObject::String(content));
                             }
                         }
-                        PyObject::None
+                        Ok(PyObject::None)
                     })),
                 );
 
                 let f_name_write = filename.clone();
                 attributes.insert(
                     "write".to_string(),
-                    PyObject::BuiltinFunction(Rc::new(move |f_args| {
+                    PyObject::BuiltinFunction(Rc::new(move |_ctx, f_args| {
                         if let Some(PyObject::String(content)) = f_args.first() {
                             std::fs::write(&f_name_write, content).ok();
                         }
-                        PyObject::None
+                        Ok(PyObject::None)
                     })),
                 );
 
-                PyObject::Instance {
+                Ok(PyObject::Instance {
                     class: Rc::new(RefCell::new(PyObject::Type("file".to_string()))),
                     attributes: Rc::new(RefCell::new(attributes)),
-                }
+                })
             })),
         );
 
         // Core built-ins for iterators
         global_env.borrow_mut().define(
             "iter".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::None;
+                    return Ok(PyObject::None);
                 }
                 let obj = &args[0];
-                match obj {
+                Ok(match obj {
                     PyObject::List(l) => PyObject::Iterator(Rc::new(RefCell::new(
                         crate::object::PyIterator::List(l.clone(), 0),
                     ))),
@@ -203,30 +286,30 @@ impl Evaluator {
                         // In a full implementation, we'd check for __iter__ method
                         PyObject::None
                     }
-                }
+                })
             })),
         );
 
         global_env.borrow_mut().define(
             "next".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::None;
+                    return Ok(PyObject::None);
                 }
                 if let PyObject::Iterator(it) = &args[0] {
                     let mut it_borrow = it.borrow_mut();
-                    it_borrow.next().unwrap_or(PyObject::None)
+                    Ok(it_borrow.next().unwrap_or(PyObject::None))
                 } else {
-                    PyObject::None
+                    Ok(PyObject::None)
                 }
             })),
         );
 
         global_env.borrow_mut().define(
             "sum".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::Int(0);
+                    return Ok(PyObject::Int(0));
                 }
                 let mut total = 0;
                 if let Some(it) = args[0].to_iterator() {
@@ -237,15 +320,15 @@ impl Evaluator {
                         }
                     }
                 }
-                PyObject::Int(total)
+                Ok(PyObject::Int(total))
             })),
         );
 
         global_env.borrow_mut().define(
             "max".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::None;
+                    return Ok(PyObject::None);
                 }
                 let mut max_val: Option<i64> = None;
                 if let Some(it) = args[0].to_iterator() {
@@ -258,15 +341,15 @@ impl Evaluator {
                         }
                     }
                 }
-                max_val.map(PyObject::Int).unwrap_or(PyObject::None)
+                Ok(max_val.map(PyObject::Int).unwrap_or(PyObject::None))
             })),
         );
 
         global_env.borrow_mut().define(
             "min".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::None;
+                    return Ok(PyObject::None);
                 }
                 let mut min_val: Option<i64> = None;
                 if let Some(it) = args[0].to_iterator() {
@@ -279,52 +362,54 @@ impl Evaluator {
                         }
                     }
                 }
-                min_val.map(PyObject::Int).unwrap_or(PyObject::None)
+                Ok(min_val.map(PyObject::Int).unwrap_or(PyObject::None))
             })),
         );
 
         global_env.borrow_mut().define(
             "all".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::Bool(true);
+                    return Ok(PyObject::Bool(true));
                 }
                 if let Some(it) = args[0].to_iterator() {
                     let mut it_borrow = it.borrow_mut();
                     while let Some(val) = it_borrow.next() {
                         match val {
-                            PyObject::Bool(b) if !b => return PyObject::Bool(false),
-                            PyObject::None => return PyObject::Bool(false),
-                            PyObject::Int(0) => return PyObject::Bool(false),
+                            PyObject::Bool(b) if !b => return Ok(PyObject::Bool(false)),
+                            PyObject::None => return Ok(PyObject::Bool(false)),
+                            PyObject::Int(0) => return Ok(PyObject::Bool(false)),
                             _ => {}
                         }
                     }
                 }
-                PyObject::Bool(true)
+                Ok(PyObject::Bool(true))
             })),
         );
 
         global_env.borrow_mut().define(
             "any".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|args| {
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 if args.is_empty() {
-                    return PyObject::Bool(false);
+                    return Ok(PyObject::Bool(false));
                 }
                 if let Some(it) = args[0].to_iterator() {
                     let mut it_borrow = it.borrow_mut();
                     while let Some(val) = it_borrow.next() {
                         match val {
-                            PyObject::Bool(b) if b => return PyObject::Bool(true),
-                            PyObject::Int(n) if n != 0 => return PyObject::Bool(true),
-                            PyObject::String(s) if !s.is_empty() => return PyObject::Bool(true),
+                            PyObject::Bool(b) if b => return Ok(PyObject::Bool(true)),
+                            PyObject::Int(n) if n != 0 => return Ok(PyObject::Bool(true)),
+                            PyObject::String(s) if !s.is_empty() => {
+                                return Ok(PyObject::Bool(true));
+                            }
                             PyObject::List(l) if !l.borrow().is_empty() => {
-                                return PyObject::Bool(true);
+                                return Ok(PyObject::Bool(true));
                             }
                             _ => {}
                         }
                     }
                 }
-                PyObject::Bool(false)
+                Ok(PyObject::Bool(false))
             })),
         );
 
@@ -352,6 +437,67 @@ def filter(f, it):
 
     pub fn add_load_path(&self, path: String) {
         self.load_paths.borrow_mut().push(path);
+    }
+
+    fn call_pyfunc(&mut self, func: &PyObject, args: Vec<PyObject>) -> Result<PyObject> {
+        match func {
+            PyObject::BuiltinFunction(f) => f(self, args),
+            PyObject::Function { params, body, .. } => {
+                if params.len() != args.len() {
+                    return Err(anyhow!(
+                        "Expected {} arguments, got {}",
+                        params.len(),
+                        args.len()
+                    ));
+                }
+                let call_env = Rc::new(RefCell::new(Environment::with_parent(
+                    self.global_env.clone(),
+                )));
+                for (param, arg) in params.iter().zip(args) {
+                    call_env.borrow_mut().define(param.clone(), arg);
+                }
+                self.eval_statements(body, call_env)
+            }
+            PyObject::Class { methods, .. } => {
+                // Instantiation
+                let instance = PyObject::Instance {
+                    class: Rc::new(RefCell::new(func.clone())),
+                    attributes: Rc::new(RefCell::new(HashMap::new())),
+                };
+                // Call __init__ if exists
+                if let Some(PyObject::Function { params, body, .. }) = methods.get("__init__") {
+                    let mut init_args = vec![instance.clone()];
+                    init_args.extend(args);
+                    if params.len() != init_args.len() {
+                        return Err(anyhow!("__init__ expected {} args", params.len()));
+                    }
+                    let call_env = Rc::new(RefCell::new(Environment::with_parent(
+                        self.global_env.clone(),
+                    )));
+                    for (param, arg) in params.iter().zip(init_args) {
+                        call_env.borrow_mut().define(param.clone(), arg);
+                    }
+                    self.eval_statements(body, call_env)?;
+                }
+                Ok(instance)
+            }
+            _ => Err(anyhow!("Object is not callable: {:?}", func)),
+        }
+    }
+
+    fn get_method(&self, obj: &PyObject, name: &str) -> Option<PyObject> {
+        match obj {
+            PyObject::Instance {
+                class, attributes, ..
+            } => {
+                if let Some(val) = attributes.borrow().get(name) {
+                    return Some(val.clone());
+                }
+                self.find_method(&class.borrow(), name)
+            }
+            PyObject::Class { .. } => self.find_method(obj, name),
+            _ => None,
+        }
     }
 
     pub fn eval(&mut self, statements: &[Stmt]) -> Result<PyObject> {
@@ -650,105 +796,7 @@ def filter(f, it):
                     evaluated_args.push(self.eval_expression(arg, env.clone())?);
                 }
 
-                // Handle special built-ins that need Evaluator access
-                if let Expr::Variable(name) = &**callee {
-                    match name.as_str() {
-                        "isinstance" => {
-                            if evaluated_args.len() == 2 {
-                                let obj = &evaluated_args[0];
-                                let target_type = &evaluated_args[1];
-
-                                match (obj, target_type) {
-                                    (PyObject::Int(_), PyObject::Type(s)) if s == "int" => {
-                                        return Ok(PyObject::Bool(true));
-                                    }
-                                    (PyObject::String(_), PyObject::Type(s)) if s == "str" => {
-                                        return Ok(PyObject::Bool(true));
-                                    }
-                                    (PyObject::Bool(_), PyObject::Type(s)) if s == "bool" => {
-                                        return Ok(PyObject::Bool(true));
-                                    }
-                                    (PyObject::List(_), PyObject::Type(s)) if s == "list" => {
-                                        return Ok(PyObject::Bool(true));
-                                    }
-                                    (PyObject::Dict(_), PyObject::Type(s)) if s == "dict" => {
-                                        return Ok(PyObject::Bool(true));
-                                    }
-                                    (PyObject::None, PyObject::Type(s)) if s == "NoneType" => {
-                                        return Ok(PyObject::Bool(true));
-                                    }
-                                    (PyObject::Instance { class, .. }, _) => {
-                                        return Ok(PyObject::Bool(
-                                            self.is_subclass(&class.borrow(), target_type),
-                                        ));
-                                    }
-                                    _ => return Ok(PyObject::Bool(false)),
-                                }
-                            }
-                            return Ok(PyObject::Bool(false));
-                        }
-                        "hasattr" => {
-                            if evaluated_args.len() == 2 {
-                                let attr_name = evaluated_args[1].to_string();
-                                match &evaluated_args[0] {
-                                    PyObject::Instance { class, attributes } => {
-                                        if attributes.borrow().contains_key(&attr_name) {
-                                            return Ok(PyObject::Bool(true));
-                                        }
-                                        return Ok(PyObject::Bool(
-                                            self.find_method(&class.borrow(), &attr_name).is_some(),
-                                        ));
-                                    }
-                                    PyObject::Class { .. } => {
-                                        return Ok(PyObject::Bool(
-                                            self.find_method(&evaluated_args[0], &attr_name)
-                                                .is_some(),
-                                        ));
-                                    }
-                                    _ => return Ok(PyObject::Bool(false)),
-                                }
-                            }
-                            return Ok(PyObject::Bool(false));
-                        }
-                        "type" => {
-                            if evaluated_args.len() == 1 {
-                                match &evaluated_args[0] {
-                                    PyObject::Int(_) => {
-                                        return Ok(PyObject::Type("int".to_string()));
-                                    }
-                                    PyObject::String(_) => {
-                                        return Ok(PyObject::Type("str".to_string()));
-                                    }
-                                    PyObject::Bool(_) => {
-                                        return Ok(PyObject::Type("bool".to_string()));
-                                    }
-                                    PyObject::List(_) => {
-                                        return Ok(PyObject::Type("list".to_string()));
-                                    }
-                                    PyObject::Dict(_) => {
-                                        return Ok(PyObject::Type("dict".to_string()));
-                                    }
-                                    PyObject::None => {
-                                        return Ok(PyObject::Type("NoneType".to_string()));
-                                    }
-                                    PyObject::Instance { class, .. } => {
-                                        return Ok(class.borrow().clone());
-                                    }
-                                    PyObject::Class { .. } => return Ok(evaluated_args[0].clone()),
-                                    _ => {
-                                        return Err(anyhow!(
-                                            "type() not fully implemented for this type"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
                 match callee_val {
-                    PyObject::BuiltinFunction(f) => Ok(f(evaluated_args)),
                     PyObject::Type(name) => {
                         // Constructor calls
                         if evaluated_args.len() != 1 {
@@ -764,59 +812,16 @@ def filter(f, it):
                             _ => Err(anyhow!("Constructor not implemented for type {}", name)),
                         }
                     }
-                    PyObject::Function { params, body, .. } => {
+                    _ => {
                         let mut call_args = evaluated_args;
-
-                        // Check if this was an attribute access to bind 'self'
                         if let Expr::Attribute(target_expr, _) = &**callee {
                             let target_val = self.eval_expression(target_expr, env.clone())?;
-                            if let PyObject::Instance { .. } = target_val {
-                                // Simple binding: insert instance as first arg
+                            if matches!(target_val, PyObject::Instance { .. }) {
                                 call_args.insert(0, target_val);
                             }
                         }
-
-                        if params.len() != call_args.len() {
-                            return Err(anyhow!(
-                                "Expected {} arguments, got {}",
-                                params.len(),
-                                call_args.len()
-                            ));
-                        }
-                        let call_env = Rc::new(RefCell::new(Environment::with_parent(
-                            self.global_env.clone(),
-                        )));
-                        for (param, arg) in params.iter().zip(call_args) {
-                            call_env.borrow_mut().define(param.clone(), arg);
-                        }
-                        self.eval_statements(&body, call_env)
+                        self.call_pyfunc(&callee_val, call_args)
                     }
-                    PyObject::Class { ref methods, .. } => {
-                        // Instantiation
-                        let instance = PyObject::Instance {
-                            class: Rc::new(RefCell::new(callee_val.clone())),
-                            attributes: Rc::new(RefCell::new(HashMap::new())),
-                        };
-                        // Call __init__ if exists
-                        if let Some(PyObject::Function { params, body, .. }) =
-                            methods.get("__init__")
-                        {
-                            let mut call_args = vec![instance.clone()];
-                            call_args.extend(evaluated_args);
-                            if params.len() != call_args.len() {
-                                return Err(anyhow!("__init__ expected {} args", params.len()));
-                            }
-                            let call_env = Rc::new(RefCell::new(Environment::with_parent(
-                                self.global_env.clone(),
-                            )));
-                            for (param, arg) in params.iter().zip(call_args) {
-                                call_env.borrow_mut().define(param.clone(), arg);
-                            }
-                            self.eval_statements(body, call_env)?;
-                        }
-                        Ok(instance)
-                    }
-                    _ => Err(anyhow!("Object is not callable: {:?}", callee_val)),
                 }
             }
             Expr::List(items) => {
@@ -838,7 +843,7 @@ def filter(f, it):
             Expr::Subscript(target, index_expr) => {
                 let left = self.eval_expression(target, env.clone())?;
                 let index = self.eval_expression(index_expr, env.clone())?;
-                let res = match (left, index) {
+                let res = match (left.clone(), index.clone()) {
                     (PyObject::List(l), PyObject::Int(i)) => {
                         let items = l.borrow();
                         let mut idx = i;
@@ -849,6 +854,78 @@ def filter(f, it):
                             .get(idx as usize)
                             .cloned()
                             .ok_or_else(|| anyhow!("List index out of range"))
+                    }
+                    (PyObject::Tuple(items), PyObject::Int(i)) => {
+                        let mut idx = i;
+                        if idx < 0 {
+                            idx += items.len() as i64;
+                        }
+                        items
+                            .get(idx as usize)
+                            .cloned()
+                            .ok_or_else(|| anyhow!("Tuple index out of range"))
+                    }
+                    (PyObject::Tuple(items), PyObject::Slice { start, stop, step }) => {
+                        let len = items.len() as i64;
+
+                        let step_val = match step.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => 1,
+                            _ => return Err(anyhow!("slice step must be an integer")),
+                        };
+                        if step_val == 0 {
+                            return Err(anyhow!("slice step cannot be zero"));
+                        }
+
+                        let mut start_val = match start.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => {
+                                if step_val > 0 {
+                                    0
+                                } else {
+                                    len - 1
+                                }
+                            }
+                            _ => return Err(anyhow!("slice start must be an integer")),
+                        };
+
+                        let mut stop_val = match stop.as_deref() {
+                            Some(PyObject::Int(n)) => *n,
+                            Some(PyObject::None) | None => {
+                                if step_val > 0 {
+                                    len
+                                } else {
+                                    -1
+                                }
+                            }
+                            _ => return Err(anyhow!("slice stop must be an integer")),
+                        };
+
+                        if start_val < 0 {
+                            start_val += len;
+                        }
+                        if stop_val < 0 && stop.is_some() {
+                            stop_val += len;
+                        }
+
+                        let mut result = Vec::new();
+                        let mut curr = start_val;
+                        if step_val > 0 {
+                            while curr < stop_val && curr < len {
+                                if curr >= 0 {
+                                    result.push(items[curr as usize].clone());
+                                }
+                                curr += step_val;
+                            }
+                        } else {
+                            while curr > stop_val && curr >= 0 {
+                                if curr < len {
+                                    result.push(items[curr as usize].clone());
+                                }
+                                curr += step_val;
+                            }
+                        }
+                        Ok(PyObject::Tuple(result))
                     }
                     (PyObject::List(l), PyObject::Slice { start, stop, step }) => {
                         let items = l.borrow();
@@ -992,7 +1069,13 @@ def filter(f, it):
                             .cloned()
                             .ok_or_else(|| anyhow!("Key '{}' not found in dictionary", key_str))
                     }
-                    _ => Err(anyhow!("Object is not subscriptable")),
+                    _ => {
+                        if let Some(method) = self.get_method(&left, "__getitem__") {
+                            self.call_pyfunc(&method, vec![left.clone(), index])
+                        } else {
+                            Err(anyhow!("Object is not subscriptable"))
+                        }
+                    }
                 }?;
                 Ok(res)
             }
@@ -1026,11 +1109,11 @@ def filter(f, it):
                     PyObject::List(l) => match attr.as_str() {
                         "append" | "push" => {
                             let l_clone = l.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |args| {
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
                                 if !args.is_empty() {
                                     l_clone.borrow_mut().push(args[0].clone());
                                 }
-                                PyObject::None
+                                Ok(PyObject::None)
                             })))
                         }
                         _ => Err(anyhow!("List object has no attribute '{}'", attr)),
@@ -1038,18 +1121,18 @@ def filter(f, it):
                     PyObject::Dict(d) => match attr.as_str() {
                         "get" => {
                             let d_clone = d.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |args| {
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
                                 if args.is_empty() {
-                                    return PyObject::None;
+                                    return Ok(PyObject::None);
                                 }
                                 let key = args[0].to_string();
                                 let borrow = d_clone.borrow();
                                 if let Some(val) = borrow.get(&key) {
-                                    val.clone()
+                                    Ok(val.clone())
                                 } else if args.len() > 1 {
-                                    args[1].clone()
+                                    Ok(args[1].clone())
                                 } else {
-                                    PyObject::None
+                                    Ok(PyObject::None)
                                 }
                             })))
                         }
@@ -1137,7 +1220,39 @@ def filter(f, it):
         }
     }
 
-    fn eval_binary_op(&self, left: PyObject, op: &BinaryOp, right: PyObject) -> Result<PyObject> {
+    fn eval_binary_op(
+        &mut self,
+        left: PyObject,
+        op: &BinaryOp,
+        right: PyObject,
+    ) -> Result<PyObject> {
+        let dunder = match op {
+            BinaryOp::Add => Some("__add__"),
+            BinaryOp::Sub => Some("__sub__"),
+            BinaryOp::Mul => Some("__mul__"),
+            BinaryOp::Div => Some("__truediv__"),
+            BinaryOp::Mod => Some("__mod__"),
+            BinaryOp::Equal => Some("__eq__"),
+            BinaryOp::NotEqual => Some("__ne__"),
+            BinaryOp::Less => Some("__lt__"),
+            BinaryOp::Greater => Some("__gt__"),
+            BinaryOp::LessEqual => Some("__le__"),
+            BinaryOp::GreaterEqual => Some("__ge__"),
+            BinaryOp::In => Some("__contains__"),
+        };
+
+        if let Some(name) = dunder {
+            let target = if op == &BinaryOp::In { &right } else { &left };
+            if let Some(method) = self.get_method(target, name) {
+                let args = if op == &BinaryOp::In {
+                    vec![right.clone(), left.clone()]
+                } else {
+                    vec![left.clone(), right.clone()]
+                };
+                return self.call_pyfunc(&method, args);
+            }
+        }
+
         if let BinaryOp::In = op {
             return match right {
                 PyObject::List(l) => {

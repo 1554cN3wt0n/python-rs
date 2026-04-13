@@ -5,6 +5,20 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+pub trait PyCallableContext {
+    fn call_method(
+        &mut self,
+        obj: &PyObject,
+        name: &str,
+        args: Vec<PyObject>,
+    ) -> anyhow::Result<PyObject>;
+    fn call_func(&mut self, func: &PyObject, args: Vec<PyObject>) -> anyhow::Result<PyObject>;
+    fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool;
+}
+
+pub type BuiltinFunc =
+    Rc<dyn Fn(&mut dyn PyCallableContext, Vec<PyObject>) -> anyhow::Result<PyObject>>;
+
 #[derive(Clone, EnumAsInner)]
 pub enum PyObject {
     Int(i64),
@@ -18,7 +32,7 @@ pub enum PyObject {
         params: Vec<String>,
         body: Vec<Stmt>,
     },
-    BuiltinFunction(Rc<dyn Fn(Vec<PyObject>) -> PyObject>),
+    BuiltinFunction(BuiltinFunc),
     Class {
         name: String,
         bases: Vec<PyObject>,
