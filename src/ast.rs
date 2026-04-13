@@ -110,6 +110,7 @@ pub enum Stmt {
         handlers: Vec<ExceptHandler>,
     },
     Import(String),
+    Raise(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

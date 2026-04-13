@@ -15,6 +15,7 @@ pub trait PyCallableContext {
     ) -> anyhow::Result<PyObject>;
     fn call_func(&mut self, func: &PyObject, args: Vec<PyObject>) -> anyhow::Result<PyObject>;
     fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool;
+    fn is_truthy(&self, obj: &PyObject) -> bool;
 }
 
 pub type BuiltinFunc =
@@ -63,19 +64,24 @@ pub enum PyIterator {
     List(Rc<RefCell<Vec<PyObject>>>, usize),
     String(String, usize),
     Range(i64, i64, i64), // current, stop, step
+    Enumerate(Rc<RefCell<PyIterator>>, i64),
+    Zip(Vec<Rc<RefCell<PyIterator>>>),
+    Map(PyObject, Vec<Rc<RefCell<PyIterator>>>),
+    Filter(PyObject, Rc<RefCell<PyIterator>>),
+    Custom(PyObject),
 }
 
 impl PyIterator {
-    pub fn next(&mut self) -> Option<PyObject> {
+    pub fn next(&mut self, ctx: &mut dyn PyCallableContext) -> anyhow::Result<Option<PyObject>> {
         match self {
             PyIterator::List(l, idx) => {
                 let items = l.borrow();
                 if *idx < items.len() {
                     let val = items[*idx].clone();
                     *idx += 1;
-                    Some(val)
+                    Ok(Some(val))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             PyIterator::String(s, idx) => {
@@ -83,20 +89,75 @@ impl PyIterator {
                 if *idx < chars.len() {
                     let val = PyObject::String(chars[*idx].to_string());
                     *idx += 1;
-                    Some(val)
+                    Ok(Some(val))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             PyIterator::Range(curr, stop, step) => {
                 if (*step > 0 && *curr < *stop) || (*step < 0 && *curr > *stop) {
                     let val = PyObject::Int(*curr);
                     *curr += *step;
-                    Some(val)
+                    Ok(Some(val))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
+            PyIterator::Enumerate(it, count) => {
+                let mut it_borrow = it.borrow_mut();
+                if let Some(val) = it_borrow.next(ctx)? {
+                    let res = PyObject::Tuple(vec![PyObject::Int(*count), val]);
+                    *count += 1;
+                    Ok(Some(res))
+                } else {
+                    Ok(None)
+                }
+            }
+            PyIterator::Zip(its) => {
+                let mut results = Vec::new();
+                for it in its {
+                    if let Some(val) = it.borrow_mut().next(ctx)? {
+                        results.push(val);
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(PyObject::Tuple(results)))
+            }
+            PyIterator::Map(func, its) => {
+                let mut args = Vec::new();
+                for it in its {
+                    if let Some(val) = it.borrow_mut().next(ctx)? {
+                        args.push(val);
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(ctx.call_func(func, args)?))
+            }
+            PyIterator::Filter(func, it) => {
+                let mut it_borrow = it.borrow_mut();
+                while let Some(val) = it_borrow.next(ctx)? {
+                    let truthy = match func {
+                        PyObject::None => val.clone(),
+                        _ => ctx.call_func(func, vec![val.clone()])?,
+                    };
+                    if ctx.is_truthy(&truthy) {
+                        return Ok(Some(val));
+                    }
+                }
+                Ok(None)
+            }
+            PyIterator::Custom(obj) => match ctx.call_method(obj, "__next__", vec![obj.clone()]) {
+                Ok(res) => Ok(Some(res)),
+                Err(e) => {
+                    if e.to_string().contains("StopIteration") {
+                        Ok(None)
+                    } else {
+                        Err(e)
+                    }
+                }
+            },
         }
     }
 }
@@ -319,7 +380,7 @@ impl fmt::Display for PyObject {
 }
 
 impl PyObject {
-    pub fn to_iterator(&self) -> Option<Rc<RefCell<PyIterator>>> {
+    pub fn to_iterator(&self, ctx: &mut dyn PyCallableContext) -> Option<Rc<RefCell<PyIterator>>> {
         match self {
             PyObject::List(l) => Some(Rc::new(RefCell::new(PyIterator::List(l.clone(), 0)))),
             PyObject::Tuple(t) => Some(Rc::new(RefCell::new(PyIterator::List(
@@ -332,7 +393,17 @@ impl PyObject {
                 0,
             )))),
             PyObject::Iterator(it) => Some(it.clone()),
-            _ => None,
+            _ => {
+                // Check for __iter__
+                if let Ok(res) = ctx.call_method(self, "__iter__", vec![self.clone()]) {
+                    if let PyObject::Iterator(it) = res {
+                        return Some(it);
+                    }
+                    // Handle case where __iter__ returns another object that is an iterator
+                    return Some(Rc::new(RefCell::new(PyIterator::Custom(res))));
+                }
+                None
+            }
         }
     }
 

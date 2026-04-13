@@ -1,0 +1,61 @@
+print("--- 1. Manual Iteration ---")
+it = iter([1, 2, 3])
+print(next(it))  # 1
+print(next(it))  # 2
+print(next(it))  # 3
+
+try:
+    print(next(it))
+except StopIteration:
+    print("Caught StopIteration")
+
+print("\n--- 2. Custom Iterator Class ---")
+class MyRange:
+    def __init__(self, start, stop):
+        self.curr = start
+        self.stop = stop
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.curr >= self.stop:
+            raise StopIteration
+        val = self.curr
+        self.curr = self.curr + 1
+        return val
+
+mr = MyRange(0, 3)
+for x in mr:
+    print(x)
+
+print("\n--- 3. Functional Tools ---")
+nums = [1, 2, 3, 4, 5]
+
+print("enumerate:")
+for i, v in enumerate(["a", "b", "c"]):
+    print(i, v)
+
+print("zip:")
+for a, b in zip([1, 2], ["x", "y"]):
+    print(a, b)
+
+print("map:")
+def square(x):
+    return x * x
+
+for s in map(square, [1, 2, 3]):
+    print(s)
+
+print("filter:")
+def is_even(x):
+    return x % 2 == 0
+
+for e in filter(is_even, [1, 2, 3, 4]):
+    print(e)
+
+print("\n--- 4. any/all ---")
+print("any([False, True, False]):", any([False, True, False]))
+print("any([False, False]):", any([False, False]))
+print("all([True, True, True]):", all([True, True, True]))
+print("all([True, False, True]):", all([True, False, True]))

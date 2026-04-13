@@ -43,6 +43,8 @@ pub enum RawToken {
     As,
     #[token("import")]
     Import,
+    #[token("raise")]
+    Raise,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),

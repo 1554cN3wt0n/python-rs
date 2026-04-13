@@ -28,6 +28,7 @@ impl Parser {
                 Ok(None)
             }
             Token::Raw(RawToken::Import) => self.parse_import_statement().map(Some),
+            Token::Raw(RawToken::Raise) => self.parse_raise_statement().map(Some),
             Token::Raw(RawToken::Def) => Ok(Some(self.parse_function_def()?)),
             Token::Raw(RawToken::Try) => self.parse_try_statement().map(Some),
             Token::Raw(RawToken::If) => self.parse_if_statement().map(Some),
@@ -634,6 +635,13 @@ impl Parser {
         } else {
             Err(anyhow!("Expected {:?}, found {:?}", expected, token))
         }
+    }
+
+    fn parse_raise_statement(&mut self) -> Result<Stmt> {
+        self.lexer.next(); // consume 'raise'
+        let expr = self.parse_expression()?;
+        self.consume_newline()?;
+        Ok(Stmt::Raise(expr))
     }
 
     fn consume_newline(&mut self) -> Result<()> {
