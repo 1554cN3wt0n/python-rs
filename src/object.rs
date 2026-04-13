@@ -16,6 +16,10 @@ pub trait PyCallableContext {
     fn call_func(&mut self, func: &PyObject, args: Vec<PyObject>) -> anyhow::Result<PyObject>;
     fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool;
     fn is_truthy(&self, obj: &PyObject) -> bool;
+    fn resume_generator(
+        &mut self,
+        state: &Rc<RefCell<GeneratorState>>,
+    ) -> anyhow::Result<Option<PyObject>>;
 }
 
 pub type BuiltinFunc =
@@ -56,10 +60,61 @@ pub enum PyObject {
         attributes: Rc<RefCell<HashMap<String, PyObject>>>,
     },
     Iterator(Rc<RefCell<PyIterator>>),
+    Generator(Rc<RefCell<GeneratorState>>),
     None,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
+pub struct GeneratorState {
+    pub stack: Vec<ExecutionFrame>,
+    pub is_finished: bool,
+}
+
+impl fmt::Debug for GeneratorState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GeneratorState")
+            .field("stack_depth", &self.stack.len())
+            .field("is_finished", &self.is_finished)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub enum ExecutionFrame {
+    Block {
+        stmts: Vec<Stmt>,
+        idx: usize,
+        env: Rc<RefCell<crate::env::Environment>>,
+    },
+    While {
+        condition: crate::ast::Expr,
+        body: Vec<Stmt>,
+        env: Rc<RefCell<crate::env::Environment>>,
+        checking_condition: bool,
+    },
+    For {
+        target: crate::ast::Expr,
+        iterator: Rc<RefCell<PyIterator>>,
+        body: Vec<Stmt>,
+        env: Rc<RefCell<crate::env::Environment>>,
+    },
+}
+
+impl fmt::Debug for ExecutionFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExecutionFrame::Block { idx, .. } => write!(f, "Frame::Block(idx={})", idx),
+            ExecutionFrame::While {
+                checking_condition, ..
+            } => {
+                write!(f, "Frame::While(checking={})", checking_condition)
+            }
+            ExecutionFrame::For { .. } => write!(f, "Frame::For"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum PyIterator {
     List(Rc<RefCell<Vec<PyObject>>>, usize),
     String(String, usize),
@@ -68,6 +123,7 @@ pub enum PyIterator {
     Zip(Vec<Rc<RefCell<PyIterator>>>),
     Map(PyObject, Vec<Rc<RefCell<PyIterator>>>),
     Filter(PyObject, Rc<RefCell<PyIterator>>),
+    Generator(Rc<RefCell<GeneratorState>>),
     Custom(PyObject),
 }
 
@@ -148,6 +204,7 @@ impl PyIterator {
                 }
                 Ok(None)
             }
+            PyIterator::Generator(state) => ctx.resume_generator(state),
             PyIterator::Custom(obj) => match ctx.call_method(obj, "__next__", vec![obj.clone()]) {
                 Ok(res) => Ok(Some(res)),
                 Err(e) => {
@@ -191,6 +248,7 @@ impl fmt::Debug for PyObject {
                 .field("step", step)
                 .finish(),
             PyObject::Instance { .. } => f.debug_struct("Instance").finish_non_exhaustive(),
+            PyObject::Generator(state) => f.debug_tuple("Generator").field(state).finish(),
             PyObject::None => write!(f, "None"),
         }
     }
@@ -374,6 +432,7 @@ impl fmt::Display for PyObject {
                     write!(f, "<instance>")
                 }
             }
+            PyObject::Generator(_) => write!(f, "<generator object>"),
             PyObject::None => write!(f, "None"),
         }
     }
@@ -393,6 +452,9 @@ impl PyObject {
                 0,
             )))),
             PyObject::Iterator(it) => Some(it.clone()),
+            PyObject::Generator(state) => {
+                Some(Rc::new(RefCell::new(PyIterator::Generator(state.clone()))))
+            }
             _ => {
                 // Check for __iter__
                 if let Ok(res) = ctx.call_method(self, "__iter__", vec![self.clone()]) {
@@ -416,6 +478,7 @@ impl PyObject {
             | PyObject::Type(_)
             | PyObject::Class { .. }
             | PyObject::Function { .. }
+            | PyObject::Generator(_)
             | PyObject::BuiltinFunction(_) => true,
             PyObject::Tuple(items) => items.iter().all(|item| item.is_hashable()),
             _ => false,

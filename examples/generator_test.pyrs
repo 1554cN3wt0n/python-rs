@@ -1,0 +1,45 @@
+print("--- 1. Simple Generator ---")
+def simple_gen():
+    print("Start")
+    yield 1
+    print("Middle")
+    yield 2
+    print("End")
+
+g = simple_gen()
+print(next(g))  # Start, 1
+print(next(g))  # Middle, 2
+try:
+    print(next(g))  # End, StopIteration
+except StopIteration:
+    print("Caught StopIteration")
+
+print("\n--- 2. Generator with Loop ---")
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+for x in counter(3):
+    print(x)
+
+print("\n--- 3. Generator with for loop ---")
+def wrapper(it):
+    for x in it:
+        yield x * 2
+
+nums = [1, 2, 3]
+for res in wrapper(nums):
+    print(res)
+
+print("\n--- 4. Nested Generators ---")
+def outer():
+    yield "Start Outer"
+    for i in range(2):
+        for val in counter(2):
+            yield (i, val)
+    yield "End Outer"
+
+for item in outer():
+    print(item)

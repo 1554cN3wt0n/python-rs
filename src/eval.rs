@@ -1,6 +1,6 @@
 use crate::ast::{BinaryOp, Expr, Literal, LogicalOp, Stmt, UnaryOp};
 use crate::env::Environment;
-use crate::object::PyObject;
+use crate::object::{ExecutionFrame, GeneratorState, PyObject};
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +34,13 @@ impl crate::object::PyCallableContext for Evaluator {
 
     fn is_truthy(&self, obj: &PyObject) -> bool {
         self.is_truthy(obj)
+    }
+
+    fn resume_generator(
+        &mut self,
+        state: &Rc<RefCell<GeneratorState>>,
+    ) -> anyhow::Result<Option<PyObject>> {
+        self.resume_generator(state)
     }
 }
 
@@ -142,6 +149,7 @@ impl Evaluator {
                         PyObject::String("builtin_function".to_string())
                     }
                     PyObject::Iterator(_) => PyObject::String("iterator".to_string()),
+                    PyObject::Generator(_) => PyObject::String("generator".to_string()),
                     PyObject::Tuple(_) => PyObject::String("tuple".to_string()),
                     PyObject::Set(_) => PyObject::String("set".to_string()),
                     PyObject::None => PyObject::String("NoneType".to_string()),
@@ -173,6 +181,9 @@ impl Evaluator {
                             return Ok(PyObject::Bool(true));
                         }
                         (PyObject::None, PyObject::Type(s)) if s == "NoneType" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::Generator(_), PyObject::Type(s)) if s == "generator" => {
                             return Ok(PyObject::Bool(true));
                         }
                         (PyObject::Instance { class, .. }, _) => {
@@ -278,19 +289,28 @@ impl Evaluator {
                 if args.is_empty() || args.len() > 2 {
                     return Err(anyhow!("TypeError: next() expects 1 or 2 arguments"));
                 }
-                if let PyObject::Iterator(it) = &args[0] {
-                    match it.borrow_mut().next(ctx)? {
-                        Some(val) => Ok(val),
-                        None => {
-                            if args.len() == 2 {
-                                Ok(args[1].clone())
-                            } else {
-                                Err(anyhow!("StopIteration"))
-                            }
+                let it_rc = if let PyObject::Iterator(it) = &args[0] {
+                    it.clone()
+                } else if let PyObject::Generator(state) = &args[0] {
+                    Rc::new(RefCell::new(crate::object::PyIterator::Generator(
+                        state.clone(),
+                    )))
+                } else {
+                    return Err(anyhow!(
+                        "TypeError: '{}' object is not an iterator",
+                        args[0]
+                    ));
+                };
+
+                match it_rc.borrow_mut().next(ctx)? {
+                    Some(val) => Ok(val),
+                    None => {
+                        if args.len() == 2 {
+                            Ok(args[1].clone())
+                        } else {
+                            Err(anyhow!("StopIteration"))
                         }
                     }
-                } else {
-                    Err(anyhow!("TypeError: '{}' is not an iterator", args[0]))
                 }
             })),
         );
@@ -522,6 +542,196 @@ impl Evaluator {
         }
     }
 
+    pub fn resume_generator(
+        &mut self,
+        state_rc: &Rc<RefCell<GeneratorState>>,
+    ) -> Result<Option<PyObject>> {
+        let mut s = state_rc.borrow_mut();
+        if s.is_finished {
+            return Ok(None);
+        }
+
+        loop {
+            let frame = match s.stack.pop() {
+                Some(f) => f,
+                None => {
+                    s.is_finished = true;
+                    return Ok(None);
+                }
+            };
+
+            match frame {
+                ExecutionFrame::Block {
+                    stmts,
+                    mut idx,
+                    env,
+                } => {
+                    if idx >= stmts.len() {
+                        continue;
+                    }
+                    let stmt = stmts[idx].clone();
+                    idx += 1;
+
+                    match stmt {
+                        Stmt::Expression(Expr::Yield(inner)) => {
+                            let val = if let Some(e) = inner {
+                                self.eval_expression(&e, env.clone())?
+                            } else {
+                                PyObject::None
+                            };
+                            s.stack.push(ExecutionFrame::Block { stmts, idx, env });
+                            return Ok(Some(val));
+                        }
+                        Stmt::Expression(expr) => {
+                            if let Expr::Yield(inner) = expr {
+                                let val = if let Some(e) = inner {
+                                    self.eval_expression(&e, env.clone())?
+                                } else {
+                                    PyObject::None
+                                };
+                                s.stack.push(ExecutionFrame::Block { stmts, idx, env });
+                                return Ok(Some(val));
+                            }
+                            self.eval_expression(&expr, env.clone())?;
+                            s.stack.push(ExecutionFrame::Block { stmts, idx, env });
+                        }
+                        Stmt::Assignment(target, value_expr) => {
+                            let value = self.eval_expression(&value_expr, env.clone())?;
+                            self.eval_assignment(&target, value, env.clone())?;
+                            s.stack.push(ExecutionFrame::Block { stmts, idx, env });
+                        }
+                        Stmt::If {
+                            condition,
+                            then_branch,
+                            else_branch,
+                        } => {
+                            let cond_val = self.eval_expression(&condition, env.clone())?;
+                            s.stack.push(ExecutionFrame::Block {
+                                stmts: stmts.clone(),
+                                idx,
+                                env: env.clone(),
+                            });
+                            if self.is_truthy(&cond_val) {
+                                s.stack.push(ExecutionFrame::Block {
+                                    stmts: then_branch,
+                                    idx: 0,
+                                    env: env.clone(),
+                                });
+                            } else if let Some(else_b) = else_branch {
+                                s.stack.push(ExecutionFrame::Block {
+                                    stmts: else_b,
+                                    idx: 0,
+                                    env: env.clone(),
+                                });
+                            }
+                        }
+                        Stmt::While { condition, body } => {
+                            s.stack.push(ExecutionFrame::Block {
+                                stmts,
+                                idx,
+                                env: env.clone(),
+                            });
+                            s.stack.push(ExecutionFrame::While {
+                                condition,
+                                body,
+                                env,
+                                checking_condition: true,
+                            });
+                        }
+                        Stmt::For {
+                            target,
+                            iterable,
+                            body,
+                        } => {
+                            let iter_val = self.eval_expression(&iterable, env.clone())?;
+                            let it_rc = iter_val
+                                .to_iterator(self)
+                                .ok_or_else(|| anyhow!("Not iterable"))?;
+                            s.stack.push(ExecutionFrame::Block {
+                                stmts,
+                                idx,
+                                env: env.clone(),
+                            });
+                            s.stack.push(ExecutionFrame::For {
+                                target,
+                                iterator: it_rc,
+                                body,
+                                env,
+                            });
+                        }
+                        Stmt::Return(_) => {
+                            s.is_finished = true;
+                            return Ok(None);
+                        }
+                        Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {
+                            self.eval_statement(&stmt, env.clone())?;
+                            s.stack.push(ExecutionFrame::Block { stmts, idx, env });
+                        }
+                        _ => {
+                            self.eval_statement(&stmt, env.clone())?;
+                            s.stack.push(ExecutionFrame::Block { stmts, idx, env });
+                        }
+                    }
+                }
+                ExecutionFrame::While {
+                    condition,
+                    body,
+                    env,
+                    mut checking_condition,
+                } => {
+                    if checking_condition {
+                        let cond_val = self.eval_expression(&condition, env.clone())?;
+                        if self.is_truthy(&cond_val) {
+                            checking_condition = false;
+                            s.stack.push(ExecutionFrame::While {
+                                condition,
+                                body: body.clone(),
+                                env: env.clone(),
+                                checking_condition,
+                            });
+                            s.stack.push(ExecutionFrame::Block {
+                                stmts: body,
+                                idx: 0,
+                                env,
+                            });
+                        }
+                        // if false, frame is not pushed back
+                    } else {
+                        checking_condition = true;
+                        s.stack.push(ExecutionFrame::While {
+                            condition,
+                            body,
+                            env,
+                            checking_condition,
+                        });
+                    }
+                }
+                ExecutionFrame::For {
+                    target,
+                    iterator,
+                    body,
+                    env,
+                } => {
+                    let next_val = iterator.borrow_mut().next(self)?;
+                    if let Some(val) = next_val {
+                        self.eval_assignment(&target, val, env.clone())?;
+                        s.stack.push(ExecutionFrame::For {
+                            target,
+                            iterator,
+                            body: body.clone(),
+                            env: env.clone(),
+                        });
+                        s.stack.push(ExecutionFrame::Block {
+                            stmts: body,
+                            idx: 0,
+                            env,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     pub fn add_load_path(&self, path: String) {
         self.load_paths.borrow_mut().push(path);
     }
@@ -543,7 +753,20 @@ impl Evaluator {
                 for (param, arg) in params.iter().zip(args) {
                     call_env.borrow_mut().define(param.clone(), arg);
                 }
-                self.eval_statements(body, call_env)
+
+                if body.iter().any(|s| s.has_yield()) {
+                    let state = GeneratorState {
+                        stack: vec![ExecutionFrame::Block {
+                            stmts: body.clone(),
+                            idx: 0,
+                            env: call_env,
+                        }],
+                        is_finished: false,
+                    };
+                    Ok(PyObject::Generator(Rc::new(RefCell::new(state))))
+                } else {
+                    self.eval_statements(body, call_env)
+                }
             }
             PyObject::Class { methods, .. } => {
                 // Instantiation
@@ -1386,6 +1609,9 @@ impl Evaluator {
                 }
                 Ok(PyObject::String(result))
             }
+            Expr::Yield(_) => Err(anyhow!(
+                "RuntimeError: yield expression not supported in this context"
+            )),
         }
     }
 

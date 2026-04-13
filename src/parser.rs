@@ -276,10 +276,28 @@ impl Parser {
     }
 
     fn parse_single_expression(&mut self) -> Result<Expr> {
-        if self.lexer.peek() == Token::Raw(RawToken::Lambda) {
-            self.parse_lambda()
+        match self.lexer.peek() {
+            Token::Raw(RawToken::Lambda) => self.parse_lambda(),
+            Token::Raw(RawToken::Yield) => self.parse_yield_expression(),
+            _ => self.parse_logical_or(),
+        }
+    }
+
+    fn parse_yield_expression(&mut self) -> Result<Expr> {
+        self.lexer.next(); // consume 'yield'
+        let peek = self.lexer.peek();
+        if peek == Token::Newline
+            || peek == Token::Eof
+            || peek == Token::Raw(RawToken::RParen)
+            || peek == Token::Raw(RawToken::RBrace)
+            || peek == Token::Raw(RawToken::RBracket)
+            || peek == Token::Raw(RawToken::Comma)
+            || peek == Token::Raw(RawToken::Colon)
+        {
+            Ok(Expr::Yield(None))
         } else {
-            self.parse_logical_or()
+            let expr = self.parse_expression()?;
+            Ok(Expr::Yield(Some(Box::new(expr))))
         }
     }
 
