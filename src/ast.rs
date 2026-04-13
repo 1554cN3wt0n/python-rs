@@ -12,7 +12,7 @@ pub enum Expr {
     Attribute(Box<Expr>, String),
     ListComprehension {
         expression: Box<Expr>,
-        target: String,
+        target: Box<Expr>,
         iterable: Box<Expr>,
         condition: Option<Box<Expr>>,
     },
@@ -26,6 +26,7 @@ pub enum Expr {
         step: Option<Box<Expr>>,
     },
     FString(Vec<FStringPart>),
+    Tuple(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,7 +86,7 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     For {
-        target: String,
+        target: Expr,
         iterable: Expr,
         body: Vec<Stmt>,
     },

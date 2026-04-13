@@ -115,7 +115,7 @@ impl Parser {
             while self.lexer.peek() != Token::Raw(RawToken::RParen)
                 && self.lexer.peek() != Token::Eof
             {
-                bases.push(self.parse_expression()?);
+                bases.push(self.parse_single_expression()?);
                 if self.lexer.peek() == Token::Raw(RawToken::Comma) {
                     self.lexer.next();
                 } else {
@@ -137,7 +137,7 @@ impl Parser {
 
     fn parse_if_statement(&mut self) -> Result<Stmt> {
         self.lexer.next(); // consume 'if'
-        let condition = self.parse_expression()?;
+        let condition = self.parse_single_expression()?;
         self.expect(Token::Raw(RawToken::Colon))?;
         self.consume_newline()?;
         let then_branch = self.parse_block()?;
@@ -162,7 +162,7 @@ impl Parser {
 
     fn parse_while_statement(&mut self) -> Result<Stmt> {
         self.lexer.next(); // consume 'while'
-        let condition = self.parse_expression()?;
+        let condition = self.parse_single_expression()?;
         self.expect(Token::Raw(RawToken::Colon))?;
         self.consume_newline()?;
         let body = self.parse_block()?;
@@ -211,10 +211,7 @@ impl Parser {
 
     fn parse_for_statement(&mut self) -> Result<Stmt> {
         self.lexer.next(); // consume 'for'
-        let target = match self.lexer.next() {
-            Token::Raw(RawToken::Identifier(id)) => id,
-            _ => return Err(anyhow!("Expected identifier after 'for'")),
-        };
+        let target = self.parse_for_target()?;
         self.expect(Token::Raw(RawToken::In))?;
         let iterable = self.parse_expression()?;
         self.expect(Token::Raw(RawToken::Colon))?;
@@ -252,6 +249,32 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expr> {
+        let mut exprs = Vec::new();
+        exprs.push(self.parse_single_expression()?);
+
+        let mut saw_comma = false;
+        while self.lexer.peek() == Token::Raw(RawToken::Comma) {
+            self.lexer.next();
+            saw_comma = true;
+            match self.lexer.peek() {
+                Token::Raw(RawToken::RParen)
+                | Token::Raw(RawToken::RBrace)
+                | Token::Raw(RawToken::RBracket)
+                | Token::Newline
+                | Token::Eof => break,
+                _ => {}
+            }
+            exprs.push(self.parse_single_expression()?);
+        }
+
+        if saw_comma {
+            Ok(Expr::Tuple(exprs))
+        } else {
+            Ok(exprs.pop().unwrap())
+        }
+    }
+
+    fn parse_single_expression(&mut self) -> Result<Expr> {
         if self.lexer.peek() == Token::Raw(RawToken::Lambda) {
             self.parse_lambda()
         } else {
@@ -276,7 +299,7 @@ impl Parser {
             }
         }
         self.expect(Token::Raw(RawToken::Colon))?;
-        let body = self.parse_expression()?;
+        let body = self.parse_single_expression()?;
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
@@ -411,7 +434,7 @@ impl Parser {
                     let mut args = Vec::new();
                     if self.lexer.peek() != Token::Raw(RawToken::RParen) {
                         loop {
-                            args.push(self.parse_expression()?);
+                            args.push(self.parse_single_expression()?);
                             if self.lexer.peek() == Token::Raw(RawToken::Comma) {
                                 self.lexer.next();
                             } else {
@@ -467,13 +490,10 @@ impl Parser {
                     return Ok(Expr::List(Vec::new()));
                 }
 
-                let expression = self.parse_expression()?;
+                let expression = self.parse_single_expression()?;
                 if self.lexer.peek() == Token::Raw(RawToken::For) {
                     self.lexer.next(); // consume 'for'
-                    let target = match self.lexer.next() {
-                        Token::Raw(RawToken::Identifier(id)) => id,
-                        _ => return Err(anyhow!("Expected identifier after 'for'")),
-                    };
+                    let target = self.parse_for_target()?;
                     self.expect(Token::Raw(RawToken::In))?;
                     let iterable = self.parse_expression()?;
                     let mut condition = None;
@@ -484,7 +504,7 @@ impl Parser {
                     self.expect(Token::Raw(RawToken::RBracket))?;
                     return Ok(Expr::ListComprehension {
                         expression: Box::new(expression),
-                        target,
+                        target: Box::new(target),
                         iterable: Box::new(iterable),
                         condition,
                     });
@@ -496,7 +516,7 @@ impl Parser {
                     if self.lexer.peek() == Token::Raw(RawToken::RBracket) {
                         break;
                     }
-                    items.push(self.parse_expression()?);
+                    items.push(self.parse_single_expression()?);
                 }
                 self.expect(Token::Raw(RawToken::RBracket))?;
                 Ok(Expr::List(items))
@@ -505,9 +525,9 @@ impl Parser {
                 let mut items = Vec::new();
                 if self.lexer.peek() != Token::Raw(RawToken::RBrace) {
                     loop {
-                        let key = self.parse_expression()?;
+                        let key = self.parse_single_expression()?;
                         self.expect(Token::Raw(RawToken::Colon))?;
-                        let val = self.parse_expression()?;
+                        let val = self.parse_single_expression()?;
                         items.push((key, val));
                         if self.lexer.peek() == Token::Raw(RawToken::Comma) {
                             self.lexer.next();
@@ -521,6 +541,10 @@ impl Parser {
             }
             Token::Raw(RawToken::Identifier(id)) => Ok(Expr::Variable(id)),
             Token::Raw(RawToken::LParen) => {
+                if self.lexer.peek() == Token::Raw(RawToken::RParen) {
+                    self.lexer.next();
+                    return Ok(Expr::Tuple(Vec::new()));
+                }
                 let expr = self.parse_expression()?;
                 self.expect(Token::Raw(RawToken::RParen))?;
                 Ok(expr)
@@ -606,5 +630,26 @@ impl Parser {
             }
         }
         Ok(Expr::FString(parts))
+    }
+
+    fn parse_for_target(&mut self) -> Result<Expr> {
+        let mut targets = Vec::new();
+        targets.push(self.parse_postfix()?);
+
+        let mut saw_comma = false;
+        while self.lexer.peek() == Token::Raw(RawToken::Comma) {
+            self.lexer.next();
+            saw_comma = true;
+            if self.lexer.peek() == Token::Raw(RawToken::In) {
+                break;
+            }
+            targets.push(self.parse_postfix()?);
+        }
+
+        if saw_comma {
+            Ok(Expr::Tuple(targets))
+        } else {
+            Ok(targets.pop().unwrap())
+        }
     }
 }

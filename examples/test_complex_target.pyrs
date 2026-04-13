@@ -1,0 +1,6 @@
+class Foo:
+    pass
+
+f = Foo()
+for f.x in [1, 2, 3]:
+    print(f.x)

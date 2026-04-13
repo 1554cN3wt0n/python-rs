@@ -1,0 +1,50 @@
+# examples/tuples.pyrs
+
+class Exception: 
+    pass
+
+print("--- 1. Tuple Creation ---")
+t1 = (1, 2, 3)
+print(f"Tuple t1: {t1}")
+
+t2 = (10,)
+print(f"Single-element tuple t2: {t2}")
+
+t3 = ()
+print(f"Empty tuple t3: {t3}")
+
+# Implicit tuple creation
+t4 = 100, 200, 300
+print(f"Implicit tuple t4: {t4}")
+
+print("\n--- 2. Unpacking ---")
+a, b, c = (1, 2, 3)
+print(f"Unpacked a={a}, b={b}, c={c}")
+
+# Unpacking from list
+x, y = [10, 20]
+print(f"Unpacked from list: x={x}, y={y}")
+
+# Nested unpacking
+p1, (p2, p3) = (1, (2, 3))
+print(f"Nested unpacked: p1={p1}, p2={p2}, p3={p3}")
+
+print("\n--- 3. For-loop Unpacking ---")
+points = [(0, 0), (1, 10), (2, 20)]
+for x, y in points:
+    print(f"Point: x={x}, y={y}")
+
+print("\n--- 4. List Comprehension Unpacking ---")
+sums = [a + b for a, b in points]
+print(f"Sums from points: {sums}")
+
+print("\n--- 5. Error Cases (Handling Mismatches) ---")
+try:
+    a, b = (1, 2, 3)
+except Exception as e:
+    print(f"Caught expected error: {e}")
+
+try:
+    a, b, c = (1, 2)
+except Exception as e:
+    print(f"Caught expected error: {e}")

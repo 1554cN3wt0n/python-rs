@@ -101,6 +101,7 @@ impl Evaluator {
                         PyObject::String("builtin_function".to_string())
                     }
                     PyObject::Iterator(_) => PyObject::String("iterator".to_string()),
+                    PyObject::Tuple(_) => PyObject::String("tuple".to_string()),
                     PyObject::None => PyObject::String("NoneType".to_string()),
                 }
             })),
@@ -250,10 +251,10 @@ impl Evaluator {
                 if let Some(it) = args[0].to_iterator() {
                     let mut it_borrow = it.borrow_mut();
                     while let Some(val) = it_borrow.next() {
-                        if let PyObject::Int(n) = val {
-                            if max_val.is_none() || n > max_val.unwrap() {
-                                max_val = Some(n);
-                            }
+                        if let PyObject::Int(n) = val
+                            && (max_val.is_none() || n > max_val.unwrap())
+                        {
+                            max_val = Some(n);
                         }
                     }
                 }
@@ -271,10 +272,10 @@ impl Evaluator {
                 if let Some(it) = args[0].to_iterator() {
                     let mut it_borrow = it.borrow_mut();
                     while let Some(val) = it_borrow.next() {
-                        if let PyObject::Int(n) = val {
-                            if min_val.is_none() || n < min_val.unwrap() {
-                                min_val = Some(n);
-                            }
+                        if let PyObject::Int(n) = val
+                            && (min_val.is_none() || n < min_val.unwrap())
+                        {
+                            min_val = Some(n);
                         }
                     }
                 }
@@ -383,37 +384,7 @@ def filter(f, it):
             }
             Stmt::Assignment(target_expr, value_expr) => {
                 let value = self.eval_expression(value_expr, env.clone())?;
-                match target_expr {
-                    Expr::Variable(name) => {
-                        env.borrow_mut().define(name.clone(), value);
-                    }
-                    Expr::Subscript(target, index_expr) => {
-                        let target_val = self.eval_expression(target, env.clone())?;
-                        let index_val = self.eval_expression(index_expr, env.clone())?;
-                        match target_val {
-                            PyObject::List(l) => {
-                                let idx = index_val
-                                    .as_int()
-                                    .ok_or_else(|| anyhow!("List index must be an integer"))?;
-                                l.borrow_mut()[*idx as usize] = value;
-                            }
-                            PyObject::Dict(d) => {
-                                let key = index_val.to_string(); // Simple string key for now
-                                d.borrow_mut().insert(key, value);
-                            }
-                            _ => return Err(anyhow!("Object does not support item assignment")),
-                        }
-                    }
-                    Expr::Attribute(target, attr) => {
-                        let target_val = self.eval_expression(target, env.clone())?;
-                        if let PyObject::Instance { attributes, .. } = target_val {
-                            attributes.borrow_mut().insert(attr.clone(), value);
-                        } else {
-                            return Err(anyhow!("Object has no attributes"));
-                        }
-                    }
-                    _ => return Err(anyhow!("Invalid assignment target")),
-                }
+                self.eval_assignment(target_expr, value, env)?;
                 Ok(None)
             }
             Stmt::If {
@@ -447,40 +418,15 @@ def filter(f, it):
                 body,
             } => {
                 let iter_val = self.eval_expression(iterable, env.clone())?;
+                let it_rc = iter_val
+                    .to_iterator()
+                    .ok_or_else(|| anyhow!("Object is not iterable"))?;
+                let mut it = it_rc.borrow_mut();
 
-                // Get iterator
-                let iterator = match iter_val {
-                    PyObject::List(l) => PyObject::Iterator(Rc::new(RefCell::new(
-                        crate::object::PyIterator::List(l, 0),
-                    ))),
-                    PyObject::String(s) => PyObject::Iterator(Rc::new(RefCell::new(
-                        crate::object::PyIterator::String(s, 0),
-                    ))),
-                    PyObject::Iterator(it) => PyObject::Iterator(it),
-                    _ => return Err(anyhow!("Object is not iterable")),
-                };
-
-                // Create 'next' caller
-                let next_key = "next".to_string();
-                let next_fn = self
-                    .global_env
-                    .borrow()
-                    .get(&next_key)
-                    .ok_or_else(|| anyhow!("Built-in 'next' not found"))?;
-
-                loop {
-                    let item = match next_fn {
-                        PyObject::BuiltinFunction(ref f) => f(vec![iterator.clone()]),
-                        _ => unreachable!(),
-                    };
-
-                    if item == PyObject::None {
-                        break;
-                    }
-
-                    env.borrow_mut().define(target.clone(), item);
-                    if let Some(val) = self.eval_block(body, env.clone())? {
-                        return Ok(Some(val));
+                while let Some(val) = it.next() {
+                    self.eval_assignment(target, val, env.clone())?;
+                    if let Some(res) = self.eval_block(body, env.clone())? {
+                        return Ok(Some(res));
                     }
                 }
                 Ok(None)
@@ -1126,9 +1072,9 @@ def filter(f, it):
 
                 let mut results = Vec::new();
                 while let Some(item) = it.next() {
-                    let mut comp_env = Environment::with_parent(env.clone());
-                    comp_env.define(target.clone(), item);
+                    let comp_env = Environment::with_parent(env.clone());
                     let rc_comp_env = Rc::new(RefCell::new(comp_env));
+                    self.eval_assignment(target, item, rc_comp_env.clone())?;
 
                     let mut should_add = true;
                     if let Some(cond) = condition {
@@ -1167,6 +1113,13 @@ def filter(f, it):
                     stop: p.map(Box::new),
                     step: t.map(Box::new),
                 })
+            }
+            Expr::Tuple(exprs) => {
+                let mut vals = Vec::new();
+                for e in exprs {
+                    vals.push(self.eval_expression(e, env.clone())?);
+                }
+                Ok(PyObject::Tuple(vals))
             }
             Expr::FString(parts) => {
                 let mut result = String::new();
@@ -1284,5 +1237,68 @@ def filter(f, it):
             }
         }
         false
+    }
+
+    fn eval_assignment(
+        &mut self,
+        target: &Expr,
+        value: PyObject,
+        env: Rc<RefCell<Environment>>,
+    ) -> Result<()> {
+        match target {
+            Expr::Variable(name) => {
+                env.borrow_mut().define(name.clone(), value);
+                Ok(())
+            }
+            Expr::Tuple(targets) | Expr::List(targets) => {
+                let it_rc = value
+                    .to_iterator()
+                    .ok_or_else(|| anyhow!("cannot unpack non-iterable object"))?;
+                let mut it = it_rc.borrow_mut();
+                for target_expr in targets {
+                    let val = it
+                        .next()
+                        .ok_or_else(|| anyhow!("not enough values to unpack"))?;
+                    self.eval_assignment(target_expr, val, env.clone())?;
+                }
+                if it.next().is_some() {
+                    return Err(anyhow!("too many values to unpack"));
+                }
+                Ok(())
+            }
+            Expr::Subscript(target, index_expr) => {
+                let target_val = self.eval_expression(target, env.clone())?;
+                let index_val = self.eval_expression(index_expr, env.clone())?;
+                match target_val {
+                    PyObject::List(l) => {
+                        let idx = index_val
+                            .as_int()
+                            .ok_or_else(|| anyhow!("List index must be an integer"))?;
+                        let mut items = l.borrow_mut();
+                        if (*idx as usize) < items.len() {
+                            items[*idx as usize] = value;
+                        } else {
+                            return Err(anyhow!("list index out of range"));
+                        }
+                    }
+                    PyObject::Dict(d) => {
+                        let key = index_val.to_string();
+                        d.borrow_mut().insert(key, value);
+                    }
+                    _ => return Err(anyhow!("Object does not support item assignment")),
+                }
+                Ok(())
+            }
+            Expr::Attribute(target, attr) => {
+                let target_val = self.eval_expression(target, env.clone())?;
+                if let PyObject::Instance { attributes, .. } = target_val {
+                    attributes.borrow_mut().insert(attr.clone(), value);
+                } else {
+                    return Err(anyhow!("Object has no attributes"));
+                }
+                Ok(())
+            }
+            _ => Err(anyhow!("Invalid assignment target")),
+        }
     }
 }

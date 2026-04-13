@@ -11,6 +11,7 @@ pub enum PyObject {
     String(String),
     Bool(bool),
     List(Rc<RefCell<Vec<PyObject>>>),
+    Tuple(Vec<PyObject>),
     Dict(Rc<RefCell<HashMap<String, PyObject>>>),
     Function {
         name: String,
@@ -91,6 +92,7 @@ impl fmt::Debug for PyObject {
             PyObject::String(s) => f.debug_tuple("String").field(s).finish(),
             PyObject::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
             PyObject::List(l) => f.debug_tuple("List").field(l).finish(),
+            PyObject::Tuple(t) => f.debug_tuple("Tuple").field(t).finish(),
             PyObject::Dict(d) => f.debug_tuple("Dict").field(d).finish(),
             PyObject::Function { name, .. } => f
                 .debug_struct("Function")
@@ -168,6 +170,19 @@ impl fmt::Display for PyObject {
                 }
                 write!(f, "]")
             }
+            PyObject::Tuple(items) => {
+                write!(f, "(")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                if items.len() == 1 {
+                    write!(f, ",")?;
+                }
+                write!(f, ")")
+            }
             PyObject::Dict(d) => {
                 write!(f, "{{")?;
                 let items = d.borrow();
@@ -221,6 +236,10 @@ impl PyObject {
     pub fn to_iterator(&self) -> Option<Rc<RefCell<PyIterator>>> {
         match self {
             PyObject::List(l) => Some(Rc::new(RefCell::new(PyIterator::List(l.clone(), 0)))),
+            PyObject::Tuple(t) => Some(Rc::new(RefCell::new(PyIterator::List(
+                Rc::new(RefCell::new(t.clone())),
+                0,
+            )))),
             PyObject::String(s) => Some(Rc::new(RefCell::new(PyIterator::String(s.clone(), 0)))),
             PyObject::Iterator(it) => Some(it.clone()),
             _ => None,

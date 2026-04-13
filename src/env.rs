@@ -39,6 +39,7 @@ impl Environment {
         None
     }
 
+    #[allow(dead_code)]
     pub fn values(&self) -> HashMap<String, PyObject> {
         self.values.clone()
     }
