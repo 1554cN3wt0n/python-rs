@@ -1,0 +1,91 @@
+print("--- PyRS Complex Demo ---")
+
+class Base:
+    def __init__(self, name):
+        self.name = name
+    
+    def __str__(self):
+        return "<Base object: " + self.name + ">"
+
+class Vector(Base):
+    def __init__(self, name, x, y):
+        self.name = name
+        self.x = x
+        self.y = y
+    
+    def __add__(self, other):
+        # Adding components
+        return Vector(self.name + "+" + other.name, self.x + other.x, self.y + other.y)
+    
+    def __str__(self):
+        # Explicitly avoiding f-strings for robustness
+        return "Vector(" + self.name + ", " + str(self.x) + ", " + str(self.y) + ")"
+
+# Generator Demonstration
+def fibonacci(n):
+    a = 0
+    b = 1
+    count = 0
+    while count < n:
+        yield a
+        temp = a + b
+        a = b
+        b = temp
+        count = count + 1
+
+# Exception Handling and Logic
+def safe_divide(a, b):
+    try:
+        if b == 0:
+            raise "ZeroDivisionError: Cannot divide by zero!"
+        return a / b
+    except:
+        return "Caught an error!"
+
+# Recursion
+def factorial(n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+# Main Demo Logic
+v1 = Vector("V1", 10, 20)
+v2 = Vector("V2", 5, 5)
+v3 = v1 + v2
+
+print("Classes and Operator Overloading:")
+print("v1: " + str(v1))
+print("v2: " + str(v2))
+print("v1 + v2: " + str(v3))
+print("v3 name: " + v3.name)
+
+print("\nGenerators and Iteration:")
+print("First 10 Fibonacci numbers:")
+fib_list = []
+for val in fibonacci(10):
+    fib_list.append(val)
+print(fib_list)
+
+print("\nException Handling:")
+print("10 / 2 = " + str(safe_divide(10, 2)))
+print("10 / 0 = " + str(safe_divide(10, 0)))
+
+print("\nRecursion:")
+print("Factorial of 5: " + str(factorial(5)))
+
+print("\nComprehensions and Sets:")
+nums = [1, 2, 3, 4, 5, 2, 3]
+# Set comprehension not supported, use set(list comprehension)
+squares = [x * x for x in nums if x % 2 == 0]
+unique_squares = set(squares)
+print("Unique squares of even numbers from " + str(nums) + ":")
+print(unique_squares)
+
+print("\nBuilt-in Functions:")
+# type() returns the class object, which str() converts to <class Name>
+print("Type of v3: " + str(type(v3)))
+print("Is v3 a Vector? " + str(isinstance(v3, Vector)))
+print("Is v3 a Base? " + str(isinstance(v3, Base)))
+print("Length of fib_list: " + str(len(fib_list)))
+
+print("\n--- Demo Complete ---")
