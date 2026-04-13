@@ -225,6 +225,7 @@ impl Evaluator {
         global_env.borrow_mut().define(
             "set".to_string(),
             PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                #[allow(clippy::mutable_key_type)]
                 if args.is_empty() {
                     return Ok(PyObject::Set(Rc::new(RefCell::new(HashSet::new()))));
                 }
@@ -232,6 +233,7 @@ impl Evaluator {
                     .to_iterator()
                     .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", args[0]))?;
                 let mut it = it_rc.borrow_mut();
+                #[allow(clippy::mutable_key_type)]
                 let mut set = HashSet::new();
                 while let Some(item) = it.next() {
                     if !item.is_hashable() {
@@ -786,21 +788,23 @@ def filter(f, it):
                 self.eval_binary_op(l, op, r)
             }
             Expr::Logical(left, op, right) => {
-                let l = self.eval_expression(left, env.clone())?;
+                let left_val = self.eval_expression(left, env.clone())?;
                 match op {
                     LogicalOp::And => {
-                        if !self.is_truthy(&l) {
-                            return Ok(l);
+                        if !self.is_truthy(&left_val) {
+                            Ok(left_val)
+                        } else {
+                            self.eval_expression(right, env)
                         }
                     }
                     LogicalOp::Or => {
-                        if self.is_truthy(&l) {
-                            return Ok(l);
+                        if self.is_truthy(&left_val) {
+                            Ok(left_val)
+                        } else {
+                            self.eval_expression(right, env)
                         }
                     }
-                    _ => unreachable!(),
                 }
-                self.eval_expression(right, env)
             }
             Expr::Unary(op, expr) => {
                 let val = self.eval_expression(expr, env)?;
@@ -1108,6 +1112,7 @@ def filter(f, it):
                 Ok(res)
             }
             Expr::Set(items) => {
+                #[allow(clippy::mutable_key_type)]
                 let mut evaluated_items = HashSet::new();
                 for item_expr in items {
                     let item = self.eval_expression(item_expr, env.clone())?;
@@ -1358,18 +1363,22 @@ def filter(f, it):
                 let s1 = l.borrow();
                 let s2 = r.borrow();
                 match op {
+                    #[allow(clippy::mutable_key_type)]
                     BinaryOp::BitwiseOr => {
                         let res: HashSet<_> = s1.union(&s2).cloned().collect();
                         Ok(PyObject::Set(Rc::new(RefCell::new(res))))
                     }
+                    #[allow(clippy::mutable_key_type)]
                     BinaryOp::BitwiseAnd => {
                         let res: HashSet<_> = s1.intersection(&s2).cloned().collect();
                         Ok(PyObject::Set(Rc::new(RefCell::new(res))))
                     }
+                    #[allow(clippy::mutable_key_type)]
                     BinaryOp::Sub => {
                         let res: HashSet<_> = s1.difference(&s2).cloned().collect();
                         Ok(PyObject::Set(Rc::new(RefCell::new(res))))
                     }
+                    #[allow(clippy::mutable_key_type)]
                     BinaryOp::BitwiseXor => {
                         let res: HashSet<_> = s1.symmetric_difference(&s2).cloned().collect();
                         Ok(PyObject::Set(Rc::new(RefCell::new(res))))

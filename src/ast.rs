@@ -40,7 +40,6 @@ pub enum FStringPart {
 pub enum LogicalOp {
     And,
     Or,
-    Not,
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
