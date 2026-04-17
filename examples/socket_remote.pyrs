@@ -21,11 +21,11 @@ try:
     s.send(request)
 
     print("Receiving response...")
-    response = s.recv(1024)
-    print("Response length:", len(response))
-    print("First 100 characters of response:")
+    # response = s.recv(1024)
+    # print("Response length:", len(response))
+    # print("First 100 characters of response:")
     # Simple slicing manually if needed, but print handles strings
-    print(response)
+    # print(response)
     s.close()
 
 except OSError as e:

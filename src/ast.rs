@@ -29,6 +29,7 @@ pub enum Expr {
     Tuple(Vec<Expr>),
     Set(Vec<Expr>),
     Yield(Option<Box<Expr>>),
+    Await(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +114,11 @@ pub enum Stmt {
     },
     Import(String),
     Raise(Expr),
+    AsyncFunctionDef {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +163,7 @@ impl Expr {
                 FStringPart::Expression(e) => e.has_yield(),
                 _ => false,
             }),
+            Expr::Await(expr) => expr.has_yield(),
             _ => false,
         }
     }
@@ -192,6 +199,7 @@ impl Stmt {
                         .iter()
                         .any(|h| h.body.iter().any(|s| s.has_yield()))
             }
+            Stmt::AsyncFunctionDef { body, .. } => body.iter().any(|s| s.has_yield()),
             _ => false,
         }
     }

@@ -1,0 +1,25 @@
+import asyncio
+
+async def say_after(delay, what):
+    print("Async task starting: " + what)
+    await asyncio.sleep(delay)
+    print("Async task finished: " + what)
+    return "Done: " + what
+
+async def main():
+    print("Main coroutine started.")
+    
+    print("Awaiting first task...")
+    res1 = await say_after(1, "hello")
+    print("First task result: " + res1)
+    
+    print("Awaiting second task...")
+    res2 = await say_after(1, "world")
+    print("Second task result: " + res2)
+    
+    print("Main coroutine finished.")
+
+print("--- Asyncio Test ---")
+print("Running event loop...")
+asyncio.run(main())
+print("Asyncio run complete.")

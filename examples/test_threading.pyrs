@@ -1,0 +1,22 @@
+import threading
+import time
+
+def worker(name, delay):
+    print("Worker " + name + " starting (delay=" + str(delay) + "s)...")
+    time.sleep(delay)
+    print("Worker " + name + " finished.")
+
+print("--- Threading Test ---")
+# Create threads
+t1 = threading.Thread(worker, ("A", 2))
+t2 = threading.Thread(worker, ("B", 1))
+
+print("Starting thread A and B...")
+t1.start()
+t2.start()
+
+print("Main thread waiting for threads to complete...")
+t1.join()
+t2.join()
+
+print("All threads joined. Main thread exiting.")

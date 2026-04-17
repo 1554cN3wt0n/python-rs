@@ -47,6 +47,10 @@ pub enum RawToken {
     Raise,
     #[token("yield")]
     Yield,
+    #[token("async")]
+    Async,
+    #[token("await")]
+    Await,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),

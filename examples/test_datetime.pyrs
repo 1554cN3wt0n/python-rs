@@ -1,0 +1,13 @@
+import datetime
+
+print("--- Datetime Test ---")
+now = datetime.datetime.now()
+print("Current datetime object:", now)
+
+# Testing strftime
+print("Formatted (Standard):", now.strftime("%Y-%m-%d %H:%M:%S"))
+print("Formatted (Year only):", now.strftime("%Y"))
+print("Formatted (Time only):", now.strftime("%H:%M:%S"))
+
+# The datetime.now() we implemented returns a DateTime object
+# that supports the strftime method.

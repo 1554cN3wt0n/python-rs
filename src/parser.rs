@@ -29,6 +29,7 @@ impl Parser {
             }
             Token::Raw(RawToken::Import) => self.parse_import_statement().map(Some),
             Token::Raw(RawToken::Raise) => self.parse_raise_statement().map(Some),
+            Token::Raw(RawToken::Async) => self.parse_async_declaration().map(Some),
             Token::Raw(RawToken::Def) => Ok(Some(self.parse_function_def()?)),
             Token::Raw(RawToken::Try) => self.parse_try_statement().map(Some),
             Token::Raw(RawToken::If) => self.parse_if_statement().map(Some),
@@ -48,6 +49,21 @@ impl Parser {
                     Ok(Some(Stmt::Expression(expr)))
                 }
             }
+        }
+    }
+
+    fn parse_async_declaration(&mut self) -> Result<Stmt> {
+        self.lexer.next(); // consume 'async'
+        match self.lexer.peek() {
+            Token::Raw(RawToken::Def) => {
+                let def = self.parse_function_def()?;
+                if let Stmt::FunctionDef { name, params, body } = def {
+                    Ok(Stmt::AsyncFunctionDef { name, params, body })
+                } else {
+                    unreachable!()
+                }
+            }
+            _ => Err(anyhow!("Expected 'def' after 'async'")),
         }
     }
 
@@ -279,8 +295,15 @@ impl Parser {
         match self.lexer.peek() {
             Token::Raw(RawToken::Lambda) => self.parse_lambda(),
             Token::Raw(RawToken::Yield) => self.parse_yield_expression(),
+            Token::Raw(RawToken::Await) => self.parse_await_expression(),
             _ => self.parse_logical_or(),
         }
+    }
+
+    fn parse_await_expression(&mut self) -> Result<Expr> {
+        self.lexer.next(); // consume 'await'
+        let expr = self.parse_unary()?;
+        Ok(Expr::Await(Box::new(expr)))
     }
 
     fn parse_yield_expression(&mut self) -> Result<Expr> {

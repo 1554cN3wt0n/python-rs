@@ -1,11 +1,12 @@
 use crate::ast::Stmt;
+use chrono::{DateTime, Local};
 use enum_as_inner::EnumAsInner;
+use parking_lot::RwLock;
 use socket2::Socket;
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub trait PyCallableContext {
     fn call_method(
@@ -25,38 +26,46 @@ pub trait PyCallableContext {
     ) -> anyhow::Result<PyObject>;
     fn resume_generator(
         &mut self,
-        state: &Rc<RefCell<GeneratorState>>,
+        state: &Arc<RwLock<GeneratorState>>,
     ) -> anyhow::Result<Option<PyObject>>;
 }
 
-pub type BuiltinFunc =
-    Rc<dyn Fn(&mut dyn PyCallableContext, Vec<PyObject>) -> anyhow::Result<PyObject>>;
+pub type BuiltinFunc = Arc<
+    dyn Fn(&mut dyn PyCallableContext, Vec<PyObject>) -> anyhow::Result<PyObject> + Send + Sync,
+>;
 
+#[allow(dead_code)]
 #[derive(Clone, EnumAsInner)]
 pub enum PyObject {
     Int(i64),
     Float(f64),
     String(String),
     Bool(bool),
-    List(Rc<RefCell<Vec<PyObject>>>),
+    DateTime(DateTime<Local>),
+    List(Arc<RwLock<Vec<PyObject>>>),
     Tuple(Vec<PyObject>),
-    Dict(Rc<RefCell<HashMap<String, PyObject>>>),
-    Set(Rc<RefCell<HashSet<PyObject>>>),
+    Dict(Arc<RwLock<HashMap<String, PyObject>>>),
+    Set(Arc<RwLock<HashSet<PyObject>>>),
     Function {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        env: Arc<RwLock<crate::env::Environment>>,
+        is_generator: bool,
+        is_async: bool,
     },
     BuiltinFunction(BuiltinFunc),
     Class {
         name: String,
         bases: Vec<PyObject>,
         methods: HashMap<String, PyObject>,
+        attributes: Arc<RwLock<HashMap<String, PyObject>>>,
+        class: Arc<RwLock<crate::env::Environment>>,
     },
     Type(String),
     Module {
         name: String,
-        env: Rc<RefCell<crate::env::Environment>>,
+        env: Arc<RwLock<crate::env::Environment>>,
     },
     Slice {
         start: Option<Box<PyObject>>,
@@ -64,12 +73,14 @@ pub enum PyObject {
         step: Option<Box<PyObject>>,
     },
     Instance {
-        class: Rc<RefCell<PyObject>>,
-        attributes: Rc<RefCell<HashMap<String, PyObject>>>,
+        class: Arc<RwLock<PyObject>>,
+        attributes: Arc<RwLock<HashMap<String, PyObject>>>,
     },
-    Iterator(Rc<RefCell<PyIterator>>),
-    Generator(Rc<RefCell<GeneratorState>>),
-    Socket(Rc<RefCell<PySocket>>),
+    Iterator(Arc<RwLock<PyIterator>>),
+    Generator(Arc<RwLock<GeneratorState>>),
+    Coroutine(Arc<RwLock<GeneratorState>>),
+    Thread(Arc<RwLock<ThreadHandle>>),
+    Socket(Arc<RwLock<PySocket>>),
     None,
 }
 
@@ -95,24 +106,38 @@ impl fmt::Debug for GeneratorState {
     }
 }
 
+pub struct ThreadHandle {
+    pub handle: Option<std::thread::JoinHandle<anyhow::Result<PyObject>>>,
+    pub target: Option<PyObject>,
+    pub args: Option<PyObject>,
+}
+
+impl fmt::Debug for ThreadHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadHandle")
+            .field("is_started", &self.handle.is_some())
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub enum ExecutionFrame {
     Block {
         stmts: Vec<Stmt>,
         idx: usize,
-        env: Rc<RefCell<crate::env::Environment>>,
+        env: Arc<RwLock<crate::env::Environment>>,
     },
     While {
         condition: crate::ast::Expr,
         body: Vec<Stmt>,
-        env: Rc<RefCell<crate::env::Environment>>,
+        env: Arc<RwLock<crate::env::Environment>>,
         checking_condition: bool,
     },
     For {
         target: crate::ast::Expr,
-        iterator: Rc<RefCell<PyIterator>>,
+        iterator: Arc<RwLock<PyIterator>>,
         body: Vec<Stmt>,
-        env: Rc<RefCell<crate::env::Environment>>,
+        env: Arc<RwLock<crate::env::Environment>>,
     },
 }
 
@@ -132,14 +157,14 @@ impl fmt::Debug for ExecutionFrame {
 
 #[derive(Debug, Clone)]
 pub enum PyIterator {
-    List(Rc<RefCell<Vec<PyObject>>>, usize),
+    List(Arc<RwLock<Vec<PyObject>>>, usize),
     String(String, usize),
     Range(i64, i64, i64), // current, stop, step
-    Enumerate(Rc<RefCell<PyIterator>>, i64),
-    Zip(Vec<Rc<RefCell<PyIterator>>>),
-    Map(PyObject, Vec<Rc<RefCell<PyIterator>>>),
-    Filter(PyObject, Rc<RefCell<PyIterator>>),
-    Generator(Rc<RefCell<GeneratorState>>),
+    Enumerate(Arc<RwLock<PyIterator>>, i64),
+    Zip(Vec<Arc<RwLock<PyIterator>>>),
+    Map(PyObject, Vec<Arc<RwLock<PyIterator>>>),
+    Filter(PyObject, Arc<RwLock<PyIterator>>),
+    Generator(Arc<RwLock<GeneratorState>>),
     Custom(PyObject),
 }
 
@@ -147,7 +172,7 @@ impl PyIterator {
     pub fn next(&mut self, ctx: &mut dyn PyCallableContext) -> anyhow::Result<Option<PyObject>> {
         match self {
             PyIterator::List(l, idx) => {
-                let items = l.borrow();
+                let items = l.read();
                 if *idx < items.len() {
                     let val = items[*idx].clone();
                     *idx += 1;
@@ -176,8 +201,8 @@ impl PyIterator {
                 }
             }
             PyIterator::Enumerate(it, count) => {
-                let mut it_borrow = it.borrow_mut();
-                if let Some(val) = it_borrow.next(ctx)? {
+                let mut it_lock = it.write();
+                if let Some(val) = it_lock.next(ctx)? {
                     let res = PyObject::Tuple(vec![PyObject::Int(*count), val]);
                     *count += 1;
                     Ok(Some(res))
@@ -188,7 +213,7 @@ impl PyIterator {
             PyIterator::Zip(its) => {
                 let mut results = Vec::new();
                 for it in its {
-                    if let Some(val) = it.borrow_mut().next(ctx)? {
+                    if let Some(val) = it.write().next(ctx)? {
                         results.push(val);
                     } else {
                         return Ok(None);
@@ -199,7 +224,7 @@ impl PyIterator {
             PyIterator::Map(func, its) => {
                 let mut args = Vec::new();
                 for it in its {
-                    if let Some(val) = it.borrow_mut().next(ctx)? {
+                    if let Some(val) = it.write().next(ctx)? {
                         args.push(val);
                     } else {
                         return Ok(None);
@@ -208,8 +233,8 @@ impl PyIterator {
                 Ok(Some(ctx.call_func(func, args)?))
             }
             PyIterator::Filter(func, it) => {
-                let mut it_borrow = it.borrow_mut();
-                while let Some(val) = it_borrow.next(ctx)? {
+                let mut it_lock = it.write();
+                while let Some(val) = it_lock.next(ctx)? {
                     let truthy = match func {
                         PyObject::None => val.clone(),
                         _ => ctx.call_func(func, vec![val.clone()])?,
@@ -242,6 +267,7 @@ impl fmt::Debug for PyObject {
             PyObject::Float(n) => f.debug_tuple("Float").field(n).finish(),
             PyObject::String(s) => f.debug_tuple("String").field(s).finish(),
             PyObject::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            PyObject::DateTime(dt) => f.debug_tuple("DateTime").field(dt).finish(),
             PyObject::List(l) => f.debug_tuple("List").field(l).finish(),
             PyObject::Tuple(t) => f.debug_tuple("Tuple").field(t).finish(),
             PyObject::Dict(d) => f.debug_tuple("Dict").field(d).finish(),
@@ -266,6 +292,8 @@ impl fmt::Debug for PyObject {
                 .finish(),
             PyObject::Instance { .. } => f.debug_struct("Instance").finish_non_exhaustive(),
             PyObject::Generator(state) => f.debug_tuple("Generator").field(state).finish(),
+            PyObject::Coroutine(state) => f.debug_tuple("Coroutine").field(state).finish(),
+            PyObject::Thread(handle) => f.debug_tuple("Thread").field(handle).finish(),
             PyObject::Socket(s) => f.debug_tuple("Socket").field(s).finish(),
             PyObject::None => write!(f, "None"),
         }
@@ -281,16 +309,13 @@ impl PartialEq for PyObject {
             (PyObject::Float(a), PyObject::Int(b)) => *a == *b as f64,
             (PyObject::String(a), PyObject::String(b)) => a == b,
             (PyObject::Bool(a), PyObject::Bool(b)) => a == b,
-            (PyObject::List(a), PyObject::List(b)) => {
-                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
-            }
+            (PyObject::DateTime(a), PyObject::DateTime(b)) => a == b,
+            (PyObject::List(a), PyObject::List(b)) => Arc::ptr_eq(a, b) || *a.read() == *b.read(),
             (PyObject::Tuple(a), PyObject::Tuple(b)) => a == b,
-            (PyObject::Dict(a), PyObject::Dict(b)) => {
-                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
-            }
-            (PyObject::Set(a), PyObject::Set(b)) => Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow(),
+            (PyObject::Dict(a), PyObject::Dict(b)) => Arc::ptr_eq(a, b) || *a.read() == *b.read(),
+            (PyObject::Set(a), PyObject::Set(b)) => Arc::ptr_eq(a, b) || *a.read() == *b.read(),
             (PyObject::Function { name: a, .. }, PyObject::Function { name: b, .. }) => a == b,
-            (PyObject::BuiltinFunction(a), PyObject::BuiltinFunction(b)) => Rc::ptr_eq(a, b),
+            (PyObject::BuiltinFunction(a), PyObject::BuiltinFunction(b)) => Arc::ptr_eq(a, b),
             (PyObject::Class { name: a, .. }, PyObject::Class { name: b, .. }) => a == b,
             (PyObject::Type(a), PyObject::Type(b)) => a == b,
             (
@@ -305,9 +330,12 @@ impl PartialEq for PyObject {
                     step: b_step,
                 },
             ) => a_start == b_start && a_stop == b_stop && a_step == b_step,
-            (PyObject::Iterator(a), PyObject::Iterator(b)) => Rc::ptr_eq(a, b),
+            (PyObject::Iterator(a), PyObject::Iterator(b)) => Arc::ptr_eq(a, b),
+            (PyObject::Generator(a), PyObject::Generator(b)) => Arc::ptr_eq(a, b),
+            (PyObject::Coroutine(a), PyObject::Coroutine(b)) => Arc::ptr_eq(a, b),
+            (PyObject::Thread(a), PyObject::Thread(b)) => Arc::ptr_eq(a, b),
             (PyObject::None, PyObject::None) => true,
-            (PyObject::Socket(a), PyObject::Socket(b)) => Rc::ptr_eq(a, b),
+            (PyObject::Socket(a), PyObject::Socket(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -364,7 +392,14 @@ impl Hash for PyObject {
             }
             PyObject::BuiltinFunction(_) => {
                 8u8.hash(state);
-                // Hash by address if we could, but let's just use a placeholder
+            }
+            PyObject::Coroutine(state_rc) => {
+                9u8.hash(state);
+                Arc::as_ptr(state_rc).hash(state);
+            }
+            PyObject::Thread(handle_rc) => {
+                10u8.hash(state);
+                Arc::as_ptr(handle_rc).hash(state);
             }
             _ => {
                 // Unhashable types should be checked before calling hash()
@@ -388,9 +423,10 @@ impl fmt::Display for PyObject {
             }
             PyObject::String(s) => write!(f, "{}", s),
             PyObject::Bool(b) => write!(f, "{}", if *b { "True" } else { "False" }),
+            PyObject::DateTime(dt) => write!(f, "{}", dt.format("%Y-%m-%d %H:%M:%S")),
             PyObject::List(l) => {
                 write!(f, "[")?;
-                let items = l.borrow();
+                let items = l.read();
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -414,7 +450,7 @@ impl fmt::Display for PyObject {
             }
             PyObject::Dict(d) => {
                 write!(f, "{{")?;
-                let items = d.borrow();
+                let items = d.read();
                 for (i, (k, v)) in items.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -425,7 +461,7 @@ impl fmt::Display for PyObject {
             }
             PyObject::Set(s) => {
                 write!(f, "{{")?;
-                let items = s.borrow();
+                let items = s.read();
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -466,7 +502,7 @@ impl fmt::Display for PyObject {
             }
             PyObject::Socket(_) => write!(f, "<socket object>"),
             PyObject::Instance { class, .. } => {
-                let class_borrow = class.borrow();
+                let class_borrow = class.read();
                 if let PyObject::Class { name, .. } = &*class_borrow {
                     write!(f, "<{} instance>", name)
                 } else {
@@ -474,27 +510,35 @@ impl fmt::Display for PyObject {
                 }
             }
             PyObject::Generator(_) => write!(f, "<generator object>"),
+            PyObject::Coroutine(_) => write!(f, "<coroutine object>"),
+            PyObject::Thread(_) => write!(f, "<thread object>"),
             PyObject::None => write!(f, "None"),
         }
     }
 }
 
 impl PyObject {
-    pub fn to_iterator(&self, ctx: &mut dyn PyCallableContext) -> Option<Rc<RefCell<PyIterator>>> {
+    pub fn to_iterator(&self, ctx: &mut dyn PyCallableContext) -> Option<Arc<RwLock<PyIterator>>> {
         match self {
-            PyObject::List(l) => Some(Rc::new(RefCell::new(PyIterator::List(l.clone(), 0)))),
-            PyObject::Tuple(t) => Some(Rc::new(RefCell::new(PyIterator::List(
-                Rc::new(RefCell::new(t.clone())),
+            PyObject::List(l) => Some(Arc::new(RwLock::new(PyIterator::List(l.clone(), 0)))),
+            PyObject::Tuple(t) => Some(Arc::new(RwLock::new(PyIterator::List(
+                Arc::new(RwLock::new(t.clone())),
                 0,
             )))),
-            PyObject::String(s) => Some(Rc::new(RefCell::new(PyIterator::String(s.clone(), 0)))),
-            PyObject::Set(s) => Some(Rc::new(RefCell::new(PyIterator::List(
-                Rc::new(RefCell::new(s.borrow().iter().cloned().collect())),
+            PyObject::String(s) => Some(Arc::new(RwLock::new(PyIterator::String(s.clone(), 0)))),
+            PyObject::Set(s) => Some(Arc::new(RwLock::new(PyIterator::List(
+                Arc::new(RwLock::new(s.read().iter().cloned().collect())),
+                0,
+            )))),
+            PyObject::Dict(d) => Some(Arc::new(RwLock::new(PyIterator::List(
+                Arc::new(RwLock::new(
+                    d.read().keys().cloned().map(PyObject::String).collect(),
+                )),
                 0,
             )))),
             PyObject::Iterator(it) => Some(it.clone()),
             PyObject::Generator(state) => {
-                Some(Rc::new(RefCell::new(PyIterator::Generator(state.clone()))))
+                Some(Arc::new(RwLock::new(PyIterator::Generator(state.clone()))))
             }
             _ => {
                 // Check for __iter__
@@ -503,7 +547,7 @@ impl PyObject {
                         return Some(it);
                     }
                     // Handle case where __iter__ returns another object that is an iterator
-                    return Some(Rc::new(RefCell::new(PyIterator::Custom(res))));
+                    return Some(Arc::new(RwLock::new(PyIterator::Custom(res))));
                 }
                 None
             }
@@ -521,6 +565,8 @@ impl PyObject {
             | PyObject::Class { .. }
             | PyObject::Function { .. }
             | PyObject::Generator(_)
+            | PyObject::Coroutine(_)
+            | PyObject::Thread(_)
             | PyObject::BuiltinFunction(_) => true,
             PyObject::Tuple(items) => items.iter().all(|item| item.is_hashable()),
             _ => false,

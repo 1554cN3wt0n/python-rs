@@ -2,18 +2,18 @@ use crate::ast::{BinaryOp, Expr, Literal, LogicalOp, Stmt, UnaryOp};
 use crate::env::Environment;
 use crate::object::{ExecutionFrame, GeneratorState, PyObject, PySocket};
 use anyhow::{Result, anyhow};
+use parking_lot::RwLock;
 use rand::RngExt;
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use socket2::{Domain, Protocol, Socket, Type};
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct Evaluator {
-    pub global_env: Rc<RefCell<Environment>>,
-    load_paths: Rc<RefCell<Vec<String>>>,
+    pub global_env: Arc<RwLock<Environment>>,
+    load_paths: Arc<RwLock<Vec<String>>>,
     builtin_modules: HashMap<String, PyObject>,
 }
 
@@ -24,10 +24,9 @@ impl crate::object::PyCallableContext for Evaluator {
         name: &str,
         args: Vec<PyObject>,
     ) -> anyhow::Result<PyObject> {
-        if let Some(method) = self.get_method(obj, name) {
-            return self.call_func(&method, args);
-        }
-        Err(anyhow!("Attribute '{}' not found on {:?}", name, obj))
+        self.get_method(obj, name)
+            .ok_or_else(|| anyhow!("Attribute '{}' not found", name))
+            .and_then(|m| self.call_pyfunc(&m, args))
     }
 
     fn call_func(&mut self, func: &PyObject, args: Vec<PyObject>) -> anyhow::Result<PyObject> {
@@ -35,18 +34,21 @@ impl crate::object::PyCallableContext for Evaluator {
     }
 
     fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool {
-        self.is_subclass(child, parent)
+        // We need to call the struct method, not the trait method.
+        // Let's use the explicit name 'is_subclass_internal' if we rename it later.
+        // For now, let's try to fix the name collision.
+        self.is_subclass_impl(child, parent)
     }
 
     fn is_truthy(&self, obj: &PyObject) -> bool {
-        self.is_truthy(obj)
+        self.is_truthy_impl(obj)
     }
 
     fn resume_generator(
         &mut self,
-        state: &Rc<RefCell<GeneratorState>>,
+        state: &Arc<RwLock<GeneratorState>>,
     ) -> anyhow::Result<Option<PyObject>> {
-        self.resume_generator(state)
+        self.resume_generator_impl(state)
     }
 
     fn eval_binary_op(
@@ -55,14 +57,14 @@ impl crate::object::PyCallableContext for Evaluator {
         op: &crate::ast::BinaryOp,
         right: PyObject,
     ) -> anyhow::Result<PyObject> {
-        self.eval_binary_op(left, op, right)
+        self.eval_binary_op_impl(left, op, right)
     }
 }
 
 impl Evaluator {
     pub fn new() -> Self {
-        let global_env = Rc::new(RefCell::new(Environment::new()));
-        let load_paths = Rc::new(RefCell::new(vec![".".to_string()]));
+        let global_env = Arc::new(RwLock::new(Environment::new()));
+        let load_paths = Arc::new(RwLock::new(vec![".".to_string()]));
         let mut evaluator = Self {
             global_env,
             load_paths,
@@ -77,9 +79,9 @@ impl Evaluator {
     fn init_builtins(&mut self) {
         let global_env = self.global_env.clone();
         // Register built-ins
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "print".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         print!(" ");
@@ -96,31 +98,35 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "len".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.len() != 1 {
-                    return Ok(PyObject::None);
+                    return Err(anyhow!("TypeError: len() takes exactly one argument"));
                 }
                 match &args[0] {
                     PyObject::String(s) => Ok(PyObject::Int(s.len() as i64)),
-                    PyObject::List(l) => Ok(PyObject::Int(l.borrow().len() as i64)),
-                    PyObject::Dict(d) => Ok(PyObject::Int(d.borrow().len() as i64)),
-                    PyObject::Set(s) => Ok(PyObject::Int(s.borrow().len() as i64)),
+                    PyObject::List(l) => Ok(PyObject::Int(l.read().len() as i64)),
+                    PyObject::Tuple(t) => Ok(PyObject::Int(t.len() as i64)),
+                    PyObject::Dict(d) => Ok(PyObject::Int(d.read().len() as i64)),
+                    PyObject::Set(s) => Ok(PyObject::Int(s.read().len() as i64)),
                     _ => {
                         if let Ok(res) = ctx.call_method(&args[0], "__len__", vec![args[0].clone()])
                         {
                             return Ok(res);
                         }
-                        Ok(PyObject::None)
+                        Err(anyhow!(
+                            "TypeError: object of type '{}' has no len()",
+                            type_name(&args[0])
+                        ))
                     }
                 }
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "range".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                 let (start, stop, step) = match args.len() {
                     1 => (0, args[0].as_i64().unwrap_or(0), 1),
                     2 => (
@@ -135,15 +141,15 @@ impl Evaluator {
                     ),
                     _ => (0, 0, 1),
                 };
-                Ok(PyObject::Iterator(Rc::new(RefCell::new(
+                Ok(PyObject::Iterator(Arc::new(RwLock::new(
                     crate::object::PyIterator::Range(start, stop, step),
                 ))))
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "str".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.len() != 1 {
                     return Ok(PyObject::None);
                 }
@@ -154,20 +160,21 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "type".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                 if args.len() != 1 {
                     return Ok(PyObject::None);
                 }
                 Ok(match &args[0] {
-                    PyObject::Int(_) => PyObject::String("int".to_string()),
-                    PyObject::Float(_) => PyObject::String("float".to_string()),
-                    PyObject::String(_) => PyObject::String("str".to_string()),
-                    PyObject::Bool(_) => PyObject::String("bool".to_string()),
+                    PyObject::Int(_)
+                    | PyObject::Float(_)
+                    | PyObject::String(_)
+                    | PyObject::Bool(_)
+                    | PyObject::DateTime(_) => PyObject::String(type_name(&args[0]).to_string()),
                     PyObject::List(_) => PyObject::String("list".to_string()),
                     PyObject::Dict(_) => PyObject::String("dict".to_string()),
-                    PyObject::Instance { class, .. } => class.borrow().clone(),
+                    PyObject::Instance { class, .. } => class.read().clone(),
                     PyObject::Class { .. } => args[0].clone(),
                     PyObject::Type(_) => args[0].clone(),
                     PyObject::Module { .. } => args[0].clone(),
@@ -178,6 +185,8 @@ impl Evaluator {
                     }
                     PyObject::Iterator(_) => PyObject::String("iterator".to_string()),
                     PyObject::Generator(_) => PyObject::String("generator".to_string()),
+                    PyObject::Coroutine(_) => PyObject::String("coroutine".to_string()),
+                    PyObject::Thread(_) => PyObject::String("thread".to_string()),
                     PyObject::Tuple(_) => PyObject::String("tuple".to_string()),
                     PyObject::Set(_) => PyObject::String("set".to_string()),
                     PyObject::Socket(_) => PyObject::String("socket".to_string()),
@@ -186,9 +195,9 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "isinstance".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.len() == 2 {
                     let obj = &args[0];
                     let target_type = &args[1];
@@ -219,9 +228,7 @@ impl Evaluator {
                             return Ok(PyObject::Bool(true));
                         }
                         (PyObject::Instance { class, .. }, _) => {
-                            return Ok(PyObject::Bool(
-                                ctx.is_subclass(&class.borrow(), target_type),
-                            ));
+                            return Ok(PyObject::Bool(ctx.is_subclass(&class.read(), target_type)));
                         }
                         _ => return Ok(PyObject::Bool(false)),
                     }
@@ -230,17 +237,15 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "hasattr".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                 if args.len() == 2 {
                     let obj = &args[0];
                     let attr_name = args[1].to_string();
                     match obj {
                         PyObject::Instance { attributes, .. } => {
-                            return Ok(PyObject::Bool(
-                                attributes.borrow().contains_key(&attr_name),
-                            ));
+                            return Ok(PyObject::Bool(attributes.read().contains_key(&attr_name)));
                         }
                         _ => return Ok(PyObject::Bool(false)),
                     }
@@ -250,103 +255,89 @@ impl Evaluator {
         );
 
         // Primitive type markers
-        global_env
-            .borrow_mut()
-            .define("int".to_string(), PyObject::Type("int".to_string()));
-        global_env
-            .borrow_mut()
-            .define("float".to_string(), PyObject::Type("float".to_string()));
-        global_env
-            .borrow_mut()
-            .define("str".to_string(), PyObject::Type("str".to_string()));
-        global_env
-            .borrow_mut()
-            .define("bool".to_string(), PyObject::Type("bool".to_string()));
-        global_env
-            .borrow_mut()
-            .define("list".to_string(), PyObject::Type("list".to_string()));
-        global_env
-            .borrow_mut()
-            .define("dict".to_string(), PyObject::Type("dict".to_string()));
-        global_env.borrow_mut().define(
-            "Exception".to_string(),
-            PyObject::Type("Exception".to_string()),
-        );
-        global_env.borrow_mut().define(
-            "ValueError".to_string(),
-            PyObject::Type("ValueError".to_string()),
-        );
-        global_env.borrow_mut().define(
-            "TypeError".to_string(),
-            PyObject::Type("TypeError".to_string()),
-        );
-        global_env.borrow_mut().define(
-            "IndexError".to_string(),
-            PyObject::Type("IndexError".to_string()),
-        );
-        global_env.borrow_mut().define(
-            "KeyError".to_string(),
-            PyObject::Type("KeyError".to_string()),
-        );
-        global_env
-            .borrow_mut()
-            .define("OSError".to_string(), PyObject::Type("OSError".to_string()));
-        global_env.borrow_mut().define(
-            "set".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
-                #[allow(clippy::mutable_key_type)]
-                if args.is_empty() {
-                    return Ok(PyObject::Set(Rc::new(RefCell::new(HashSet::new()))));
-                }
-                let it_rc = args[0]
-                    .to_iterator(ctx)
-                    .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", args[0]))?;
-                let mut it = it_rc.borrow_mut();
-                #[allow(clippy::mutable_key_type)]
-                let mut set = HashSet::new();
-                while let Some(item) = it.next(ctx)? {
-                    if !item.is_hashable() {
-                        return Err(anyhow!("TypeError: unhashable type: '{:?}'", item));
+        {
+            let mut env = global_env.write();
+            env.define("int".to_string(), PyObject::Type("int".to_string()));
+            env.define("float".to_string(), PyObject::Type("float".to_string()));
+            env.define("str".to_string(), PyObject::Type("str".to_string()));
+            env.define("bool".to_string(), PyObject::Type("bool".to_string()));
+            env.define("list".to_string(), PyObject::Type("list".to_string()));
+            env.define("dict".to_string(), PyObject::Type("dict".to_string()));
+            env.define(
+                "Exception".to_string(),
+                PyObject::Type("Exception".to_string()),
+            );
+            env.define(
+                "ValueError".to_string(),
+                PyObject::Type("ValueError".to_string()),
+            );
+            env.define(
+                "TypeError".to_string(),
+                PyObject::Type("TypeError".to_string()),
+            );
+            env.define(
+                "IndexError".to_string(),
+                PyObject::Type("IndexError".to_string()),
+            );
+            env.define(
+                "KeyError".to_string(),
+                PyObject::Type("KeyError".to_string()),
+            );
+            env.define("OSError".to_string(), PyObject::Type("OSError".to_string()));
+            env.define(
+                "set".to_string(),
+                PyObject::BuiltinFunction(Arc::new(|ctx, args| {
+                    #[allow(clippy::mutable_key_type)]
+                    if args.is_empty() {
+                        return Ok(PyObject::Set(Arc::new(RwLock::new(HashSet::new()))));
                     }
-                    set.insert(item);
-                }
-                Ok(PyObject::Set(Rc::new(RefCell::new(set))))
-            })),
-        );
+                    let it_rc = args[0].to_iterator(ctx).ok_or_else(|| {
+                        anyhow!("TypeError: '{}' object is not iterable", args[0])
+                    })?;
+                    let mut it = it_rc.write();
+                    #[allow(clippy::mutable_key_type)]
+                    let mut set = HashSet::new();
+                    while let Some(item) = it.next(ctx)? {
+                        if !item.is_hashable() {
+                            return Err(anyhow!("TypeError: unhashable type: '{:?}'", item));
+                        }
+                        set.insert(item);
+                    }
+                    Ok(PyObject::Set(Arc::new(RwLock::new(set))))
+                })),
+            );
+            env.define(
+                "NoneType".to_string(),
+                PyObject::Type("NoneType".to_string()),
+            );
+            env.define(
+                "StopIteration".to_string(),
+                PyObject::Type("StopIteration".to_string()),
+            );
+            env.define(
+                "iter".to_string(),
+                PyObject::BuiltinFunction(Arc::new(|ctx, args| {
+                    if args.len() != 1 {
+                        return Err(anyhow!("TypeError: iter() expects 1 argument"));
+                    }
+                    let it = args[0].to_iterator(ctx).ok_or_else(|| {
+                        anyhow!("TypeError: '{}' object is not iterable", args[0])
+                    })?;
+                    Ok(PyObject::Iterator(it))
+                })),
+            );
+        }
 
-        global_env.borrow_mut().define(
-            "NoneType".to_string(),
-            PyObject::Type("NoneType".to_string()),
-        );
-
-        global_env.borrow_mut().define(
-            "StopIteration".to_string(),
-            PyObject::Type("StopIteration".to_string()),
-        );
-
-        global_env.borrow_mut().define(
-            "iter".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
-                if args.len() != 1 {
-                    return Err(anyhow!("TypeError: iter() expects 1 argument"));
-                }
-                let it = args[0]
-                    .to_iterator(ctx)
-                    .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", args[0]))?;
-                Ok(PyObject::Iterator(it))
-            })),
-        );
-
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "next".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(anyhow!("TypeError: next() expects 1 or 2 arguments"));
                 }
                 let it_rc = if let PyObject::Iterator(it) = &args[0] {
                     it.clone()
                 } else if let PyObject::Generator(state) = &args[0] {
-                    Rc::new(RefCell::new(crate::object::PyIterator::Generator(
+                    Arc::new(RwLock::new(crate::object::PyIterator::Generator(
                         state.clone(),
                     )))
                 } else {
@@ -356,7 +347,7 @@ impl Evaluator {
                     ));
                 };
 
-                match it_rc.borrow_mut().next(ctx)? {
+                match it_rc.write().next(ctx)? {
                     Some(val) => Ok(val),
                     None => {
                         if args.len() == 2 {
@@ -369,21 +360,16 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "any".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.len() != 1 {
                     return Err(anyhow!("TypeError: any() expects 1 argument"));
                 }
                 let it_rc = args[0]
                     .to_iterator(ctx)
                     .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", args[0]))?;
-                let mut it = it_rc.borrow_mut();
-                // We need is_truthy here, but ctx is PyCallableContext.
-                // Evaluator implements PyCallableContext.
-                // But BuiltinFunction closure doesn't have access to Evaluator methods directly
-                // unless we cast or add them to the trait.
-                // For now, let's use a simple check or we might need to add is_truthy to trait.
+                let mut it = it_rc.write();
                 while let Some(item) = it.next(ctx)? {
                     if ctx.is_truthy(&item) {
                         return Ok(PyObject::Bool(true));
@@ -393,16 +379,16 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "all".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.len() != 1 {
                     return Err(anyhow!("TypeError: all() expects 1 argument"));
                 }
                 let it_rc = args[0]
                     .to_iterator(ctx)
                     .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", args[0]))?;
-                let mut it = it_rc.borrow_mut();
+                let mut it = it_rc.write();
                 while let Some(item) = it.next(ctx)? {
                     if !ctx.is_truthy(&item) {
                         return Ok(PyObject::Bool(false));
@@ -412,9 +398,9 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "enumerate".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(anyhow!("TypeError: enumerate() expects 1 or 2 arguments"));
                 }
@@ -426,15 +412,15 @@ impl Evaluator {
                 } else {
                     0
                 };
-                Ok(PyObject::Iterator(Rc::new(RefCell::new(
+                Ok(PyObject::Iterator(Arc::new(RwLock::new(
                     crate::object::PyIterator::Enumerate(it, start),
                 ))))
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "zip".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 let mut iterators = Vec::new();
                 for arg in args {
                     let it = arg
@@ -442,15 +428,15 @@ impl Evaluator {
                         .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", arg))?;
                     iterators.push(it);
                 }
-                Ok(PyObject::Iterator(Rc::new(RefCell::new(
+                Ok(PyObject::Iterator(Arc::new(RwLock::new(
                     crate::object::PyIterator::Zip(iterators),
                 ))))
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "map".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.len() < 2 {
                     return Err(anyhow!("TypeError: map() expects at least 2 arguments"));
                 }
@@ -462,15 +448,15 @@ impl Evaluator {
                         .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", arg))?;
                     iterators.push(it);
                 }
-                Ok(PyObject::Iterator(Rc::new(RefCell::new(
+                Ok(PyObject::Iterator(Arc::new(RwLock::new(
                     crate::object::PyIterator::Map(func, iterators),
                 ))))
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "filter".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.len() != 2 {
                     return Err(anyhow!("TypeError: filter() expects 2 arguments"));
                 }
@@ -478,7 +464,7 @@ impl Evaluator {
                 let it = args[1]
                     .to_iterator(ctx)
                     .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", args[1]))?;
-                Ok(PyObject::Iterator(Rc::new(RefCell::new(
+                Ok(PyObject::Iterator(Arc::new(RwLock::new(
                     crate::object::PyIterator::Filter(func, it),
                 ))))
             })),
@@ -486,9 +472,9 @@ impl Evaluator {
 
         // File I/O
         let open_load_paths = self.load_paths.clone();
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "open".to_string(),
-            PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
                 if args.is_empty() {
                     return Ok(PyObject::None);
                 }
@@ -500,8 +486,9 @@ impl Evaluator {
 
                 attributes.insert(
                     "read".to_string(),
-                    PyObject::BuiltinFunction(Rc::new(move |_ctx, _| {
-                        for path in inner_load_paths.borrow().iter() {
+                    PyObject::BuiltinFunction(Arc::new(move |_ctx, _| {
+                        let lock = inner_load_paths.read();
+                        for path in lock.iter() {
                             let p = std::path::Path::new(path).join(&f_name_read);
                             if let Ok(content) = std::fs::read_to_string(p) {
                                 return Ok(PyObject::String(content));
@@ -514,7 +501,7 @@ impl Evaluator {
                 let f_name_write = filename.clone();
                 attributes.insert(
                     "write".to_string(),
-                    PyObject::BuiltinFunction(Rc::new(move |_ctx, f_args| {
+                    PyObject::BuiltinFunction(Arc::new(move |_ctx, f_args| {
                         if let Some(PyObject::String(content)) = f_args.first() {
                             std::fs::write(&f_name_write, content).ok();
                         }
@@ -523,22 +510,22 @@ impl Evaluator {
                 );
 
                 Ok(PyObject::Instance {
-                    class: Rc::new(RefCell::new(PyObject::Type("file".to_string()))),
-                    attributes: Rc::new(RefCell::new(attributes)),
+                    class: Arc::new(RwLock::new(PyObject::Type("file".to_string()))),
+                    attributes: Arc::new(RwLock::new(attributes)),
                 })
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "sum".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.is_empty() {
                     return Ok(PyObject::Int(0));
                 }
                 let mut total = PyObject::Int(0);
                 if let Some(it) = args[0].to_iterator(ctx) {
-                    let mut it_borrow = it.borrow_mut();
-                    while let Some(val) = it_borrow.next(ctx)? {
+                    let mut it_lock = it.write();
+                    while let Some(val) = it_lock.next(ctx)? {
                         total = ctx.eval_binary_op(total, &BinaryOp::Add, val)?;
                     }
                 }
@@ -546,16 +533,16 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "max".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.is_empty() {
                     return Ok(PyObject::None);
                 }
                 let mut max_val: Option<PyObject> = None;
                 if let Some(it) = args[0].to_iterator(ctx) {
-                    let mut it_borrow = it.borrow_mut();
-                    while let Some(val) = it_borrow.next(ctx)? {
+                    let mut it_lock = it.write();
+                    while let Some(val) = it_lock.next(ctx)? {
                         match &max_val {
                             None => max_val = Some(val),
                             Some(current_max) => {
@@ -575,16 +562,16 @@ impl Evaluator {
             })),
         );
 
-        global_env.borrow_mut().define(
+        global_env.write().define(
             "min".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+            PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                 if args.is_empty() {
                     return Ok(PyObject::None);
                 }
                 let mut min_val: Option<PyObject> = None;
                 if let Some(it) = args[0].to_iterator(ctx) {
-                    let mut it_borrow = it.borrow_mut();
-                    while let Some(val) = it_borrow.next(ctx)? {
+                    let mut it_lock = it.write();
+                    while let Some(val) = it_lock.next(ctx)? {
                         match &min_val {
                             None => min_val = Some(val),
                             Some(current_min) => {
@@ -606,21 +593,112 @@ impl Evaluator {
     }
 
     fn init_builtin_modules(&mut self) {
+        let datetime_module = self.create_module(
+            "datetime",
+            vec![(
+                "datetime",
+                PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
+                    if args.is_empty() {
+                        return Ok(PyObject::DateTime(chrono::Local::now()));
+                    }
+                    Ok(PyObject::None)
+                })),
+            )],
+        );
+        if let PyObject::Module { env, .. } = &datetime_module {
+            let now_fn = PyObject::BuiltinFunction(Arc::new(|_ctx, _args| {
+                Ok(PyObject::DateTime(chrono::Local::now()))
+            }));
+            let dt_class = self.create_module("datetime", vec![("now", now_fn)]);
+            env.write().define("datetime".to_string(), dt_class);
+        }
+        self.builtin_modules
+            .insert("datetime".to_string(), datetime_module);
+
+        // --- threading module ---
+        let threading_module = self.create_module(
+            "threading",
+            vec![
+                (
+                    "Thread",
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
+                        // target, args=()
+                        let target = args.get(0).cloned().unwrap_or(PyObject::None);
+                        let thread_args = args.get(1).cloned().unwrap_or(PyObject::Tuple(vec![]));
+                        Ok(PyObject::Thread(Arc::new(RwLock::new(
+                            crate::object::ThreadHandle {
+                                handle: None,
+                                target: Some(target),
+                                args: Some(thread_args),
+                            },
+                        ))))
+                    })),
+                ),
+                (
+                    "current_thread",
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, _args| {
+                        Ok(PyObject::String("MainThread".to_string())) // Simplified
+                    })),
+                ),
+            ],
+        );
+        self.builtin_modules
+            .insert("threading".to_string(), threading_module);
+
+        // --- asyncio module ---
+        let asyncio_module = self.create_module(
+            "asyncio",
+            vec![
+                (
+                    "run",
+                    PyObject::BuiltinFunction(Arc::new(|ctx, args| {
+                        if args.is_empty() {
+                            return Err(anyhow!(
+                                "TypeError: run() missing 1 required positional argument"
+                            ));
+                        }
+                        let coro = &args[0];
+                        if let PyObject::Coroutine(state) = coro {
+                            let mut last_val = PyObject::None;
+                            while let Some(val) = ctx.resume_generator(state)? {
+                                last_val = val;
+                            }
+                            Ok(last_val)
+                        } else {
+                            Err(anyhow!(
+                                "TypeError: a coroutine was expected, got {:?}",
+                                coro
+                            ))
+                        }
+                    })),
+                ),
+                (
+                    "sleep",
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
+                        let sec = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
+                        std::thread::sleep(std::time::Duration::from_secs_f64(sec));
+                        Ok(PyObject::None)
+                    })),
+                ),
+            ],
+        );
+        self.builtin_modules
+            .insert("asyncio".to_string(), asyncio_module);
         // --- sys module ---
         let sys_module = self.create_module(
             "sys",
             vec![
                 (
                     "argv",
-                    PyObject::List(Rc::new(RefCell::new(
+                    PyObject::List(Arc::new(RwLock::new(
                         std::env::args().map(PyObject::String).collect(),
                     ))),
                 ),
                 (
                     "path",
-                    PyObject::List(Rc::new(RefCell::new(
+                    PyObject::List(Arc::new(RwLock::new(
                         self.load_paths
-                            .borrow()
+                            .read()
                             .iter()
                             .map(|p| PyObject::String(p.clone()))
                             .collect(),
@@ -629,7 +707,7 @@ impl Evaluator {
                 ("version", PyObject::String("PyRS 0.1.0".to_string())),
                 (
                     "exit",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let code = if let Some(arg) = args.first() {
                             match arg {
                                 PyObject::Int(n) => *n as i32,
@@ -649,7 +727,7 @@ impl Evaluator {
         let mut os_attrs = vec![
             (
                 "getcwd",
-                PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                PyObject::BuiltinFunction(Arc::new(|_ctx, _args| {
                     Ok(PyObject::String(
                         std::env::current_dir()
                             .map(|p| p.to_string_lossy().to_string())
@@ -659,7 +737,7 @@ impl Evaluator {
             ),
             (
                 "listdir",
-                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                     let path = if let Some(PyObject::String(p)) = args.first() {
                         p.clone()
                     } else {
@@ -673,12 +751,12 @@ impl Evaluator {
                             ));
                         }
                     }
-                    Ok(PyObject::List(Rc::new(RefCell::new(entries))))
+                    Ok(PyObject::List(Arc::new(RwLock::new(entries))))
                 })),
             ),
             (
                 "mkdir",
-                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                     let path = args
                         .first()
                         .ok_or_else(|| {
@@ -691,7 +769,7 @@ impl Evaluator {
             ),
             (
                 "remove",
-                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                     let path = args
                         .first()
                         .ok_or_else(|| {
@@ -704,7 +782,7 @@ impl Evaluator {
             ),
             (
                 "rename",
-                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                     if args.len() < 2 {
                         return Err(anyhow!(
                             "TypeError: rename() missing 2 required positional arguments"
@@ -720,7 +798,7 @@ impl Evaluator {
         for (k, v) in std::env::vars() {
             env_vars.insert(k, PyObject::String(v));
         }
-        os_attrs.push(("environ", PyObject::Dict(Rc::new(RefCell::new(env_vars)))));
+        os_attrs.push(("environ", PyObject::Dict(Arc::new(RwLock::new(env_vars)))));
 
         // os.path submodule
         let os_path = self.create_module(
@@ -728,28 +806,28 @@ impl Evaluator {
             vec![
                 (
                     "exists",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let path = args.first().map(|a| a.to_string()).unwrap_or_default();
                         Ok(PyObject::Bool(std::path::Path::new(&path).exists()))
                     })),
                 ),
                 (
                     "isdir",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let path = args.first().map(|a| a.to_string()).unwrap_or_default();
                         Ok(PyObject::Bool(std::path::Path::new(&path).is_dir()))
                     })),
                 ),
                 (
                     "isfile",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let path = args.first().map(|a| a.to_string()).unwrap_or_default();
                         Ok(PyObject::Bool(std::path::Path::new(&path).is_file()))
                     })),
                 ),
                 (
                     "join",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let mut path = std::path::PathBuf::new();
                         for arg in args {
                             path.push(arg.to_string());
@@ -759,7 +837,7 @@ impl Evaluator {
                 ),
                 (
                     "split",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let path_str = args.first().map(|a| a.to_string()).unwrap_or_default();
                         let path = std::path::Path::new(&path_str);
                         let head = path
@@ -791,7 +869,7 @@ impl Evaluator {
                 ("e", PyObject::Float(std::f64::consts::E)),
                 (
                     "sqrt",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -804,7 +882,7 @@ impl Evaluator {
                 ),
                 (
                     "sin",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -817,7 +895,7 @@ impl Evaluator {
                 ),
                 (
                     "cos",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -830,7 +908,7 @@ impl Evaluator {
                 ),
                 (
                     "tan",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -843,7 +921,7 @@ impl Evaluator {
                 ),
                 (
                     "asin",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -856,7 +934,7 @@ impl Evaluator {
                 ),
                 (
                     "acos",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -869,7 +947,7 @@ impl Evaluator {
                 ),
                 (
                     "atan",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -882,7 +960,7 @@ impl Evaluator {
                 ),
                 (
                     "exp",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -895,7 +973,7 @@ impl Evaluator {
                 ),
                 (
                     "log",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -915,7 +993,7 @@ impl Evaluator {
                 ),
                 (
                     "log10",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -928,7 +1006,7 @@ impl Evaluator {
                 ),
                 (
                     "floor",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -941,7 +1019,7 @@ impl Evaluator {
                 ),
                 (
                     "ceil",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -954,7 +1032,7 @@ impl Evaluator {
                 ),
                 (
                     "gcd",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         if args.len() < 2 {
                             return Err(anyhow!(
                                 "TypeError: gcd() missing 2 required positional arguments"
@@ -977,7 +1055,7 @@ impl Evaluator {
                 ),
                 (
                     "factorial",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let n = args
                             .first()
                             .ok_or_else(|| {
@@ -1011,14 +1089,14 @@ impl Evaluator {
             vec![
                 (
                     "random",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, _args| {
                         let mut rng = rand::rng();
                         Ok(PyObject::Float(rng.random::<f64>()))
                     })),
                 ),
                 (
                     "uniform",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         if args.len() < 2 {
                             return Err(anyhow!(
                                 "TypeError: uniform() missing 2 required positional arguments"
@@ -1036,7 +1114,7 @@ impl Evaluator {
                 ),
                 (
                     "randint",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         if args.len() < 2 {
                             return Err(anyhow!(
                                 "TypeError: randint() missing 2 required positional arguments"
@@ -1054,14 +1132,14 @@ impl Evaluator {
                 ),
                 (
                     "choice",
-                    PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|ctx, args| {
                         let seq = args.first().ok_or_else(|| {
                             anyhow!("TypeError: choice() missing 1 required positional argument")
                         })?;
                         if let Some(it) = seq.to_iterator(ctx) {
                             let mut items = Vec::new();
-                            let mut it_borrow = it.borrow_mut();
-                            while let Some(val) = it_borrow.next(ctx)? {
+                            let mut it_lock = it.write();
+                            while let Some(val) = it_lock.next(ctx)? {
                                 items.push(val);
                             }
                             if items.is_empty() {
@@ -1088,7 +1166,7 @@ impl Evaluator {
             vec![
                 (
                     "time",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, _args| {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default();
@@ -1097,7 +1175,7 @@ impl Evaluator {
                 ),
                 (
                     "sleep",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let secs = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
                         std::thread::sleep(std::time::Duration::from_secs_f64(secs));
                         Ok(PyObject::None)
@@ -1113,7 +1191,7 @@ impl Evaluator {
             vec![
                 (
                     "loads",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let s = args
                             .first()
                             .ok_or_else(|| {
@@ -1127,7 +1205,7 @@ impl Evaluator {
                 ),
                 (
                     "dumps",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let obj = args.first().ok_or_else(|| {
                             anyhow!("TypeError: dumps() missing 1 required positional argument")
                         })?;
@@ -1147,7 +1225,7 @@ impl Evaluator {
             vec![
                 (
                     "search",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         if args.len() < 2 {
                             return Err(anyhow!(
                                 "TypeError: search() missing 2 required positional arguments"
@@ -1168,9 +1246,9 @@ impl Evaluator {
                             }
                             res.insert(
                                 "groups".to_string(),
-                                PyObject::List(Rc::new(RefCell::new(groups))),
+                                PyObject::List(Arc::new(RwLock::new(groups))),
                             );
-                            Ok(PyObject::Dict(Rc::new(RefCell::new(res))))
+                            Ok(PyObject::Dict(Arc::new(RwLock::new(res))))
                         } else {
                             Ok(PyObject::None)
                         }
@@ -1178,7 +1256,7 @@ impl Evaluator {
                 ),
                 (
                     "match",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         if args.len() < 2 {
                             return Err(anyhow!(
                                 "TypeError: match() missing 2 required positional arguments"
@@ -1200,9 +1278,9 @@ impl Evaluator {
                             }
                             res.insert(
                                 "groups".to_string(),
-                                PyObject::List(Rc::new(RefCell::new(groups))),
+                                PyObject::List(Arc::new(RwLock::new(groups))),
                             );
-                            Ok(PyObject::Dict(Rc::new(RefCell::new(res))))
+                            Ok(PyObject::Dict(Arc::new(RwLock::new(res))))
                         } else {
                             Ok(PyObject::None)
                         }
@@ -1210,7 +1288,7 @@ impl Evaluator {
                 ),
                 (
                     "findall",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         if args.len() < 2 {
                             return Err(anyhow!(
                                 "TypeError: findall() missing 2 required positional arguments"
@@ -1223,12 +1301,12 @@ impl Evaluator {
                             .find_iter(&text)
                             .map(|m| PyObject::String(m.as_str().to_string()))
                             .collect();
-                        Ok(PyObject::List(Rc::new(RefCell::new(matches))))
+                        Ok(PyObject::List(Arc::new(RwLock::new(matches))))
                     })),
                 ),
                 (
                     "sub",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         if args.len() < 3 {
                             return Err(anyhow!(
                                 "TypeError: sub() missing 3 required positional arguments"
@@ -1258,7 +1336,7 @@ impl Evaluator {
                 ("error", PyObject::Type("OSError".to_string())),
                 (
                     "socket",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let family = args.get(0).and_then(|a| a.as_int()).cloned().unwrap_or(2);
                         let type_ = args.get(1).and_then(|a| a.as_int()).cloned().unwrap_or(1);
                         let proto = args.get(2).and_then(|a| a.as_int()).cloned().unwrap_or(0);
@@ -1270,7 +1348,7 @@ impl Evaluator {
                         let socket = Socket::new(domain, rtype, protocol)
                             .map_err(|e| anyhow!("OSError: {}", e))?;
 
-                        Ok(PyObject::Socket(Rc::new(RefCell::new(PySocket {
+                        Ok(PyObject::Socket(Arc::new(RwLock::new(PySocket {
                             inner: socket,
                             family: family as i32,
                             type_: type_ as i32,
@@ -1279,14 +1357,14 @@ impl Evaluator {
                 ),
                 (
                     "gethostname",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, _args| {
                         let name = hostname::get().map_err(|e| anyhow!("OSError: {}", e))?;
                         Ok(PyObject::String(name.to_string_lossy().into_owned()))
                     })),
                 ),
                 (
                     "gethostbyname",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let name = args
                             .first()
                             .ok_or_else(|| anyhow!("TypeError: gethostbyname() takes 1 argument"))?
@@ -1304,7 +1382,7 @@ impl Evaluator {
                 ),
                 (
                     "inet_aton",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let ip = args
                             .first()
                             .ok_or_else(|| anyhow!("TypeError: inet_aton() takes 1 argument"))?
@@ -1318,7 +1396,7 @@ impl Evaluator {
                 ),
                 (
                     "inet_ntoa",
-                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    PyObject::BuiltinFunction(Arc::new(|_ctx, args| {
                         let data = args
                             .first()
                             .ok_or_else(|| anyhow!("TypeError: inet_ntoa() takes 1 argument"))?
@@ -1338,9 +1416,9 @@ impl Evaluator {
     }
 
     fn create_module(&self, name: &str, attrs: Vec<(&str, PyObject)>) -> PyObject {
-        let env = Rc::new(RefCell::new(Environment::new()));
+        let env = Arc::new(RwLock::new(Environment::new()));
         for (k, v) in attrs {
-            env.borrow_mut().define(k.to_string(), v);
+            env.write().define(k.to_string(), v);
         }
         PyObject::Module {
             name: name.to_string(),
@@ -1348,11 +1426,11 @@ impl Evaluator {
         }
     }
 
-    pub fn resume_generator(
+    pub fn resume_generator_impl(
         &mut self,
-        state_rc: &Rc<RefCell<GeneratorState>>,
+        state_rc: &Arc<RwLock<GeneratorState>>,
     ) -> Result<Option<PyObject>> {
-        let mut s = state_rc.borrow_mut();
+        let mut s = state_rc.write();
         if s.is_finished {
             return Ok(None);
         }
@@ -1417,7 +1495,7 @@ impl Evaluator {
                                 idx,
                                 env: env.clone(),
                             });
-                            if self.is_truthy(&cond_val) {
+                            if self.is_truthy_impl(&cond_val) {
                                 s.stack.push(ExecutionFrame::Block {
                                     stmts: then_branch,
                                     idx: 0,
@@ -1465,11 +1543,18 @@ impl Evaluator {
                                 env,
                             });
                         }
-                        Stmt::Return(_) => {
+                        Stmt::Return(expr) => {
+                            let val = if let Some(e) = expr {
+                                self.eval_expression(&e, env.clone())?
+                            } else {
+                                PyObject::None
+                            };
                             s.is_finished = true;
-                            return Ok(None);
+                            return Ok(Some(val));
                         }
-                        Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {
+                        Stmt::FunctionDef { .. }
+                        | Stmt::AsyncFunctionDef { .. }
+                        | Stmt::ClassDef { .. } => {
                             self.eval_statement(&stmt, env.clone())?;
                             s.stack.push(ExecutionFrame::Block { stmts, idx, env });
                         }
@@ -1487,7 +1572,7 @@ impl Evaluator {
                 } => {
                     if checking_condition {
                         let cond_val = self.eval_expression(&condition, env.clone())?;
-                        if self.is_truthy(&cond_val) {
+                        if self.is_truthy_impl(&cond_val) {
                             checking_condition = false;
                             s.stack.push(ExecutionFrame::While {
                                 condition,
@@ -1518,7 +1603,7 @@ impl Evaluator {
                     body,
                     env,
                 } => {
-                    let next_val = iterator.borrow_mut().next(self)?;
+                    let next_val = iterator.write().next(self)?;
                     if let Some(val) = next_val {
                         self.eval_assignment(&target, val, env.clone())?;
                         s.stack.push(ExecutionFrame::For {
@@ -1538,14 +1623,20 @@ impl Evaluator {
         }
     }
 
-    pub fn add_load_path(&self, path: String) {
-        self.load_paths.borrow_mut().push(path);
+    pub fn add_load_path(&mut self, path: String) {
+        self.load_paths.write().push(path);
     }
 
     fn call_pyfunc(&mut self, func: &PyObject, args: Vec<PyObject>) -> Result<PyObject> {
         match func {
             PyObject::BuiltinFunction(f) => f(self, args),
-            PyObject::Function { params, body, .. } => {
+            PyObject::Function {
+                params,
+                body,
+                is_generator,
+                is_async,
+                ..
+            } => {
                 if params.len() != args.len() {
                     return Err(anyhow!(
                         "Expected {} arguments, got {}",
@@ -1553,14 +1644,14 @@ impl Evaluator {
                         args.len()
                     ));
                 }
-                let call_env = Rc::new(RefCell::new(Environment::with_parent(
+                let call_env = Arc::new(RwLock::new(Environment::with_parent(
                     self.global_env.clone(),
                 )));
                 for (param, arg) in params.iter().zip(args) {
-                    call_env.borrow_mut().define(param.clone(), arg);
+                    call_env.write().define(param.clone(), arg);
                 }
 
-                if body.iter().any(|s| s.has_yield()) {
+                if *is_async {
                     let state = GeneratorState {
                         stack: vec![ExecutionFrame::Block {
                             stmts: body.clone(),
@@ -1569,7 +1660,17 @@ impl Evaluator {
                         }],
                         is_finished: false,
                     };
-                    Ok(PyObject::Generator(Rc::new(RefCell::new(state))))
+                    Ok(PyObject::Coroutine(Arc::new(RwLock::new(state))))
+                } else if *is_generator {
+                    let state = GeneratorState {
+                        stack: vec![ExecutionFrame::Block {
+                            stmts: body.clone(),
+                            idx: 0,
+                            env: call_env,
+                        }],
+                        is_finished: false,
+                    };
+                    Ok(PyObject::Generator(Arc::new(RwLock::new(state))))
                 } else {
                     self.eval_statements(body, call_env)
                 }
@@ -1577,8 +1678,8 @@ impl Evaluator {
             PyObject::Class { methods, .. } => {
                 // Instantiation
                 let instance = PyObject::Instance {
-                    class: Rc::new(RefCell::new(func.clone())),
-                    attributes: Rc::new(RefCell::new(HashMap::new())),
+                    class: Arc::new(RwLock::new(func.clone())),
+                    attributes: Arc::new(RwLock::new(HashMap::new())),
                 };
                 // Call __init__ if exists
                 if let Some(PyObject::Function { params, body, .. }) = methods.get("__init__") {
@@ -1587,11 +1688,11 @@ impl Evaluator {
                     if params.len() != init_args.len() {
                         return Err(anyhow!("__init__ expected {} args", params.len()));
                     }
-                    let call_env = Rc::new(RefCell::new(Environment::with_parent(
+                    let call_env = Arc::new(RwLock::new(Environment::with_parent(
                         self.global_env.clone(),
                     )));
                     for (param, arg) in params.iter().zip(init_args) {
-                        call_env.borrow_mut().define(param.clone(), arg);
+                        call_env.write().define(param.clone(), arg);
                     }
                     self.eval_statements(body, call_env)?;
                 }
@@ -1603,13 +1704,261 @@ impl Evaluator {
 
     fn get_method(&self, obj: &PyObject, name: &str) -> Option<PyObject> {
         match obj {
+            PyObject::List(l) => match name {
+                "append" | "push" => {
+                    let l_clone = l.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        if !args.is_empty() {
+                            l_clone.write().push(args[0].clone());
+                        }
+                        Ok(PyObject::None)
+                    })))
+                }
+                _ => None,
+            },
+            PyObject::Dict(d) => match name {
+                "get" => {
+                    let d_clone = d.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        if args.is_empty() {
+                            return Ok(PyObject::None);
+                        }
+                        let key = args[0].to_string();
+                        let lock = d_clone.read();
+                        if let Some(val) = lock.get(&key) {
+                            Ok(val.clone())
+                        } else if args.len() > 1 {
+                            Ok(args[1].clone())
+                        } else {
+                            Ok(PyObject::None)
+                        }
+                    })))
+                }
+                _ => None,
+            },
+            PyObject::Socket(s) => match name {
+                "bind" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        let addr_obj = args
+                            .first()
+                            .ok_or_else(|| anyhow!("TypeError: bind() takes 1 argument"))?;
+                        let addr = resolve_addr(addr_obj)?;
+                        s_clone
+                            .read()
+                            .inner
+                            .bind(&addr.into())
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::None)
+                    })))
+                }
+                "listen" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        let backlog = args
+                            .first()
+                            .and_then(|a| a.as_int())
+                            .cloned()
+                            .unwrap_or(128);
+                        s_clone
+                            .read()
+                            .inner
+                            .listen(backlog as i32)
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::None)
+                    })))
+                }
+                "accept" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, _args| {
+                        let (client, addr) = s_clone
+                            .read()
+                            .inner
+                            .accept()
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+                        let family = s_clone.read().family;
+                        let type_ = s_clone.read().type_;
+                        let py_client = PyObject::Socket(Arc::new(RwLock::new(PySocket {
+                            inner: client,
+                            family,
+                            type_,
+                        })));
+                        let addr_tuple = match addr.as_socket() {
+                            Some(addr) => PyObject::Tuple(vec![
+                                PyObject::String(addr.ip().to_string()),
+                                PyObject::Int(addr.port() as i64),
+                            ]),
+                            None => PyObject::None,
+                        };
+                        Ok(PyObject::Tuple(vec![py_client, addr_tuple]))
+                    })))
+                }
+                "connect" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        let addr_obj = args
+                            .first()
+                            .ok_or_else(|| anyhow!("TypeError: connect() takes 1 argument"))?;
+                        let addr = resolve_addr(addr_obj)?;
+                        s_clone
+                            .read()
+                            .inner
+                            .connect(&addr.into())
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::None)
+                    })))
+                }
+                "send" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        let data = args
+                            .first()
+                            .ok_or_else(|| anyhow!("TypeError: send() takes 1 argument"))?;
+                        let bytes = data.to_string().into_bytes();
+                        let sent = s_clone
+                            .read()
+                            .inner
+                            .send(&bytes)
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::Int(sent as i64))
+                    })))
+                }
+                "recv" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        let bufsize = args
+                            .first()
+                            .and_then(|a| a.as_int())
+                            .cloned()
+                            .unwrap_or(4096);
+                        let mut buf = vec![0u8; bufsize as usize];
+                        let n = unsafe {
+                            let uninit_buf = std::slice::from_raw_parts_mut(
+                                buf.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>,
+                                buf.len(),
+                            );
+                            s_clone.read().inner.recv(uninit_buf)
+                        }
+                        .map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::String(
+                            String::from_utf8_lossy(&buf[..n]).to_string(),
+                        ))
+                    })))
+                }
+                "close" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, _args| {
+                        let _ = s_clone.read().inner.shutdown(std::net::Shutdown::Both);
+                        Ok(PyObject::None)
+                    })))
+                }
+                "setsockopt" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        if args.len() < 3 {
+                            return Err(anyhow!("TypeError: setsockopt() takes 3 arguments"));
+                        }
+                        let level = args[0].as_int().cloned().unwrap_or(0) as i32;
+                        let optname = args[1].as_int().cloned().unwrap_or(0) as i32;
+                        if level == 1 && optname == 2 {
+                            let val = args[2].as_int().cloned().unwrap_or(0) != 0;
+                            s_clone
+                                .read()
+                                .inner
+                                .set_reuse_address(val)
+                                .map_err(|e| anyhow!("OSError: {}", e))?;
+                        }
+                        Ok(PyObject::None)
+                    })))
+                }
+                "setblocking" => {
+                    let s_clone = s.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |ctx, args| {
+                        let blocking = args.first().map(|a| ctx.is_truthy(a)).unwrap_or(true);
+                        s_clone
+                            .read()
+                            .inner
+                            .set_nonblocking(!blocking)
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::None)
+                    })))
+                }
+                _ => None,
+            },
+            PyObject::DateTime(dt) => {
+                if name == "strftime" {
+                    let dt_val = *dt;
+                    return Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, args| {
+                        let format = args
+                            .first()
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".to_string());
+                        Ok(PyObject::String(dt_val.format(&format).to_string()))
+                    })));
+                }
+                None
+            }
+            PyObject::Thread(handle_rc) => match name {
+                "start" => {
+                    let handle_rc = handle_rc.clone();
+                    let global_env = self.global_env.clone();
+                    let load_paths = self.load_paths.clone();
+                    let builtin_modules = self.builtin_modules.clone();
+
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, _args| {
+                        let mut handle_guard = handle_rc.write();
+                        if handle_guard.handle.is_some() {
+                            return Err(anyhow!("RuntimeError: threads can only be started once"));
+                        }
+
+                        let target = handle_guard.target.clone().unwrap_or(PyObject::None);
+                        let thread_args_obj =
+                            handle_guard.args.clone().unwrap_or(PyObject::Tuple(vec![]));
+                        let thread_args = match thread_args_obj {
+                            PyObject::Tuple(v) => v,
+                            PyObject::List(l) => l.read().clone(),
+                            _ => vec![thread_args_obj],
+                        };
+
+                        let global_env_c = global_env.clone();
+                        let load_paths_c = load_paths.clone();
+                        let builtin_modules_c = builtin_modules.clone();
+
+                        let h = std::thread::spawn(move || {
+                            let mut eval = Evaluator {
+                                global_env: global_env_c,
+                                load_paths: load_paths_c,
+                                builtin_modules: builtin_modules_c,
+                            };
+                            eval.call_pyfunc(&target, thread_args)
+                        });
+                        handle_guard.handle = Some(h);
+                        Ok(PyObject::None)
+                    })))
+                }
+                "join" => {
+                    let handle_rc = handle_rc.clone();
+                    Some(PyObject::BuiltinFunction(Arc::new(move |_ctx, _args| {
+                        let mut handle_guard = handle_rc.write();
+                        if let Some(h) = handle_guard.handle.take() {
+                            match h.join() {
+                                Ok(res) => res,
+                                Err(_) => Err(anyhow!("RuntimeError: thread panicked")),
+                            }
+                        } else {
+                            Ok(PyObject::None)
+                        }
+                    })))
+                }
+                _ => None,
+            },
             PyObject::Instance {
                 class, attributes, ..
             } => {
-                if let Some(val) = attributes.borrow().get(name) {
+                if let Some(val) = attributes.read().get(name) {
                     return Some(val.clone());
                 }
-                self.find_method(&class.borrow(), name)
+                self.find_method(&class.read(), name)
             }
             PyObject::Class { .. } => self.find_method(obj, name),
             _ => None,
@@ -1623,7 +1972,7 @@ impl Evaluator {
     fn eval_statements(
         &mut self,
         statements: &[Stmt],
-        env: Rc<RefCell<Environment>>,
+        env: Arc<RwLock<Environment>>,
     ) -> Result<PyObject> {
         let last_value = PyObject::None;
         for stmt in statements {
@@ -1637,7 +1986,7 @@ impl Evaluator {
     fn eval_statement(
         &mut self,
         stmt: &Stmt,
-        env: Rc<RefCell<Environment>>,
+        env: Arc<RwLock<Environment>>,
     ) -> Result<Option<PyObject>> {
         match stmt {
             Stmt::Expression(expr) => {
@@ -1655,19 +2004,19 @@ impl Evaluator {
                 else_branch,
             } => {
                 let cond_val = self.eval_expression(condition, env.clone())?;
-                if self.is_truthy(&cond_val) {
-                    return self.eval_block(then_branch, env);
-                } else if let Some(else_branch) = else_branch {
-                    return self.eval_block(else_branch, env);
+                if self.is_truthy_impl(&cond_val) {
+                    self.eval_block(then_branch, env)
+                } else if let Some(else_body) = else_branch {
+                    self.eval_block(else_body, env)
+                } else {
+                    Ok(None)
                 }
-                Ok(None)
             }
             Stmt::While { condition, body } => {
-                loop {
+                while {
                     let cond_val = self.eval_expression(condition, env.clone())?;
-                    if !self.is_truthy(&cond_val) {
-                        break;
-                    }
+                    self.is_truthy_impl(&cond_val)
+                } {
                     if let Some(val) = self.eval_block(body, env.clone())? {
                         return Ok(Some(val));
                     }
@@ -1682,11 +2031,12 @@ impl Evaluator {
                 let iter_val = self.eval_expression(iterable, env.clone())?;
                 let it_rc = iter_val
                     .to_iterator(self)
-                    .ok_or_else(|| anyhow!("Object is not iterable"))?;
-                while let Some(val) = it_rc.borrow_mut().next(self)? {
-                    self.eval_assignment(target, val, env.clone())?;
-                    if let Some(res) = self.eval_block(body, env.clone())? {
-                        return Ok(Some(res));
+                    .ok_or_else(|| anyhow!("TypeError: '{}' object is not iterable", iter_val))?;
+                let mut it = it_rc.write();
+                while let Some(item) = it.next(self)? {
+                    self.eval_assignment(target, item, env.clone())?;
+                    if let Some(val) = self.eval_block(body, env.clone())? {
+                        return Ok(Some(val));
                     }
                 }
                 Ok(None)
@@ -1696,8 +2046,23 @@ impl Evaluator {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
+                    env: env.clone(),
+                    is_generator: body.iter().any(|s| s.has_yield()),
+                    is_async: false,
                 };
-                env.borrow_mut().define(name.clone(), func);
+                env.write().define(name.clone(), func);
+                Ok(None)
+            }
+            Stmt::AsyncFunctionDef { name, params, body } => {
+                let func = PyObject::Function {
+                    name: name.clone(),
+                    params: params.clone(),
+                    body: body.clone(),
+                    env: env.clone(),
+                    is_generator: body.iter().any(|s| s.has_yield()),
+                    is_async: true,
+                };
+                env.write().define(name.clone(), func);
                 Ok(None)
             }
             Stmt::ClassDef {
@@ -1712,28 +2077,44 @@ impl Evaluator {
 
                 let mut class_methods = HashMap::new();
                 for stmt in methods {
-                    if let Stmt::FunctionDef { name: m_name, .. } = stmt {
+                    if let Stmt::FunctionDef { name: m_name, .. }
+                    | Stmt::AsyncFunctionDef { name: m_name, .. } = stmt
+                    {
                         // Create method
                         let func = PyObject::Function {
                             name: m_name.clone(),
                             params: match stmt {
-                                Stmt::FunctionDef { params, .. } => params.clone(),
+                                Stmt::FunctionDef { params, .. }
+                                | Stmt::AsyncFunctionDef { params, .. } => params.clone(),
                                 _ => unreachable!(),
                             },
                             body: match stmt {
-                                Stmt::FunctionDef { body, .. } => body.clone(),
+                                Stmt::FunctionDef { body, .. }
+                                | Stmt::AsyncFunctionDef { body, .. } => body.clone(),
                                 _ => unreachable!(),
                             },
+                            env: env.clone(),
+                            is_generator: match stmt {
+                                Stmt::FunctionDef { body, .. }
+                                | Stmt::AsyncFunctionDef { body, .. } => {
+                                    body.iter().any(|s| s.has_yield())
+                                }
+                                _ => false,
+                            },
+                            is_async: matches!(stmt, Stmt::AsyncFunctionDef { .. }),
                         };
                         class_methods.insert(m_name.clone(), func);
                     }
                 }
+                let class_env = Arc::new(RwLock::new(Environment::with_parent(env.clone())));
                 let class = PyObject::Class {
                     name: name.clone(),
                     bases: evaluated_bases,
                     methods: class_methods,
+                    attributes: Arc::new(RwLock::new(HashMap::new())),
+                    class: class_env,
                 };
-                env.borrow_mut().define(name.clone(), class);
+                env.write().define(name.clone(), class);
                 Ok(None)
             }
             Stmt::Return(expr) => {
@@ -1750,7 +2131,7 @@ impl Evaluator {
                 let filename = format!("{}.pyrs", rel_path);
 
                 let mut content = None;
-                for path in self.load_paths.borrow().iter() {
+                for path in self.load_paths.read().iter() {
                     let p = std::path::Path::new(path).join(&filename);
                     if let Ok(c) = std::fs::read_to_string(p) {
                         content = Some(c);
@@ -1759,7 +2140,7 @@ impl Evaluator {
                 }
 
                 if let Some(builtin) = self.builtin_modules.get(name) {
-                    env.borrow_mut().define(name.clone(), builtin.clone());
+                    env.write().define(name.clone(), builtin.clone());
                     return Ok(None);
                 }
 
@@ -1771,7 +2152,7 @@ impl Evaluator {
                 let statements = parser.parse()?;
 
                 let mut module_evaluator = Evaluator::new();
-                *module_evaluator.load_paths.borrow_mut() = self.load_paths.borrow().clone();
+                *module_evaluator.load_paths.write() = self.load_paths.read().clone();
                 module_evaluator.eval(&statements)?;
 
                 let module = PyObject::Module {
@@ -1784,11 +2165,11 @@ impl Evaluator {
                 for (i, part) in parts.iter().enumerate() {
                     if i == parts.len() - 1 {
                         current_scope
-                            .borrow_mut()
+                            .write()
                             .define(part.to_string(), module.clone());
                     } else {
                         let sub_module = {
-                            let maybe_sub = current_scope.borrow().get(part);
+                            let maybe_sub = current_scope.read().get(part);
                             match maybe_sub {
                                 Some(PyObject::Module { name, env }) => PyObject::Module {
                                     name: name.clone(),
@@ -1797,11 +2178,9 @@ impl Evaluator {
                                 _ => {
                                     let m = PyObject::Module {
                                         name: part.to_string(),
-                                        env: Rc::new(RefCell::new(Environment::new())),
+                                        env: Arc::new(RwLock::new(Environment::new())),
                                     };
-                                    current_scope
-                                        .borrow_mut()
-                                        .define(part.to_string(), m.clone());
+                                    current_scope.write().define(part.to_string(), m.clone());
                                     m
                                 }
                             }
@@ -1831,10 +2210,10 @@ impl Evaluator {
                             }
                             if matches {
                                 let handler_env =
-                                    Rc::new(RefCell::new(Environment::with_parent(env.clone())));
+                                    Arc::new(RwLock::new(Environment::with_parent(env.clone())));
                                 if let Some(name) = &handler.name {
                                     handler_env
-                                        .borrow_mut()
+                                        .write()
                                         .define(name.clone(), PyObject::String(e.to_string()));
                                 }
                                 return self.eval_block(&handler.body, handler_env);
@@ -1854,7 +2233,7 @@ impl Evaluator {
     fn eval_block(
         &mut self,
         statements: &[Stmt],
-        env: Rc<RefCell<Environment>>,
+        env: Arc<RwLock<Environment>>,
     ) -> Result<Option<PyObject>> {
         for stmt in statements {
             if let Some(val) = self.eval_statement(stmt, env.clone())? {
@@ -1864,7 +2243,7 @@ impl Evaluator {
         Ok(None)
     }
 
-    fn eval_expression(&mut self, expr: &Expr, env: Rc<RefCell<Environment>>) -> Result<PyObject> {
+    fn eval_expression(&mut self, expr: &Expr, env: Arc<RwLock<Environment>>) -> Result<PyObject> {
         match expr {
             Expr::Literal(lit) => match lit {
                 Literal::Int(n) => Ok(PyObject::Int(*n)),
@@ -1874,26 +2253,26 @@ impl Evaluator {
                 Literal::None => Ok(PyObject::None),
             },
             Expr::Variable(name) => env
-                .borrow()
+                .read()
                 .get(name)
                 .ok_or_else(|| anyhow!("Undefined variable: {}", name)),
             Expr::Binary(left, op, right) => {
                 let l = self.eval_expression(left, env.clone())?;
                 let r = self.eval_expression(right, env.clone())?;
-                self.eval_binary_op(l, op, r)
+                self.eval_binary_op_impl(l, op, r)
             }
             Expr::Logical(left, op, right) => {
                 let left_val = self.eval_expression(left, env.clone())?;
                 match op {
                     LogicalOp::And => {
-                        if !self.is_truthy(&left_val) {
+                        if !self.is_truthy_impl(&left_val) {
                             Ok(left_val)
                         } else {
                             self.eval_expression(right, env)
                         }
                     }
                     LogicalOp::Or => {
-                        if self.is_truthy(&left_val) {
+                        if self.is_truthy_impl(&left_val) {
                             Ok(left_val)
                         } else {
                             self.eval_expression(right, env)
@@ -1904,7 +2283,7 @@ impl Evaluator {
             Expr::Unary(op, expr) => {
                 let val = self.eval_expression(expr, env)?;
                 match op {
-                    UnaryOp::Not => Ok(PyObject::Bool(!self.is_truthy(&val))),
+                    UnaryOp::Not => Ok(PyObject::Bool(!self.is_truthy_impl(&val))),
                     UnaryOp::Neg => match val {
                         PyObject::Int(n) => Ok(PyObject::Int(-n)),
                         _ => Err(anyhow!("Unary minus only supports integers")),
@@ -1930,9 +2309,9 @@ impl Evaluator {
                                 "str" => Ok(PyObject::String("".to_string())),
                                 "int" => Ok(PyObject::Int(0)),
                                 "bool" => Ok(PyObject::Bool(false)),
-                                "list" => Ok(PyObject::List(Rc::new(RefCell::new(Vec::new())))),
+                                "list" => Ok(PyObject::List(Arc::new(RwLock::new(Vec::new())))),
                                 "tuple" => Ok(PyObject::Tuple(Vec::new())),
-                                "dict" => Ok(PyObject::Dict(Rc::new(RefCell::new(HashMap::new())))),
+                                "dict" => Ok(PyObject::Dict(Arc::new(RwLock::new(HashMap::new())))),
                                 _ => Err(anyhow!("Constructor not implemented for type {}", name)),
                             };
                         }
@@ -1946,14 +2325,14 @@ impl Evaluator {
                                 PyObject::String(s) => Ok(PyObject::Int(s.parse().unwrap_or(0))),
                                 _ => Err(anyhow!("Could not convert to int")),
                             },
-                            "bool" => Ok(PyObject::Bool(self.is_truthy(&evaluated_args[0]))),
+                            "bool" => Ok(PyObject::Bool(self.is_truthy_impl(&evaluated_args[0]))),
                             "list" => {
                                 if let Some(it) = evaluated_args[0].to_iterator(self) {
                                     let mut items = Vec::new();
-                                    while let Some(val) = it.borrow_mut().next(self)? {
+                                    while let Some(val) = it.write().next(self)? {
                                         items.push(val);
                                     }
-                                    Ok(PyObject::List(Rc::new(RefCell::new(items))))
+                                    Ok(PyObject::List(Arc::new(RwLock::new(items))))
                                 } else {
                                     Err(anyhow!(
                                         "TypeError: '{}' is not iterable",
@@ -1964,7 +2343,7 @@ impl Evaluator {
                             "tuple" => {
                                 if let Some(it) = evaluated_args[0].to_iterator(self) {
                                     let mut items = Vec::new();
-                                    while let Some(val) = it.borrow_mut().next(self)? {
+                                    while let Some(val) = it.write().next(self)? {
                                         items.push(val);
                                     }
                                     Ok(PyObject::Tuple(items))
@@ -1978,7 +2357,7 @@ impl Evaluator {
                             "dict" => {
                                 if let Some(it) = evaluated_args[0].to_iterator(self) {
                                     let mut items = HashMap::new();
-                                    while let Some(item) = it.borrow_mut().next(self)? {
+                                    while let Some(item) = it.write().next(self)? {
                                         if let PyObject::Tuple(ref kv) = item
                                             && kv.len() == 2
                                         {
@@ -1993,7 +2372,7 @@ impl Evaluator {
                                             }
                                         ));
                                     }
-                                    Ok(PyObject::Dict(Rc::new(RefCell::new(items))))
+                                    Ok(PyObject::Dict(Arc::new(RwLock::new(items))))
                                 } else {
                                     Err(anyhow!(
                                         "TypeError: '{}' is not iterable",
@@ -2021,7 +2400,7 @@ impl Evaluator {
                 for item in items {
                     evaluated_items.push(self.eval_expression(item, env.clone())?);
                 }
-                Ok(PyObject::List(Rc::new(RefCell::new(evaluated_items))))
+                Ok(PyObject::List(Arc::new(RwLock::new(evaluated_items))))
             }
             Expr::Dict(items) => {
                 let mut evaluated_items = HashMap::new();
@@ -2030,14 +2409,14 @@ impl Evaluator {
                     let val = self.eval_expression(val_expr, env.clone())?;
                     evaluated_items.insert(key, val);
                 }
-                Ok(PyObject::Dict(Rc::new(RefCell::new(evaluated_items))))
+                Ok(PyObject::Dict(Arc::new(RwLock::new(evaluated_items))))
             }
             Expr::Subscript(target, index_expr) => {
                 let left = self.eval_expression(target, env.clone())?;
                 let index = self.eval_expression(index_expr, env.clone())?;
                 let res = match (left.clone(), index.clone()) {
                     (PyObject::List(l), PyObject::Int(i)) => {
-                        let items = l.borrow();
+                        let items = l.read();
                         let mut idx = i;
                         if idx < 0 {
                             idx += items.len() as i64;
@@ -2120,7 +2499,7 @@ impl Evaluator {
                         Ok(PyObject::Tuple(result))
                     }
                     (PyObject::List(l), PyObject::Slice { start, stop, step }) => {
-                        let items = l.borrow();
+                        let items = l.read();
                         let len = items.len() as i64;
 
                         let step_val = match step.as_deref() {
@@ -2180,7 +2559,7 @@ impl Evaluator {
                                 curr += step_val;
                             }
                         }
-                        Ok(PyObject::List(Rc::new(RefCell::new(result))))
+                        Ok(PyObject::List(Arc::new(RwLock::new(result))))
                     }
                     (PyObject::String(s), PyObject::Int(i)) => {
                         let mut idx = i;
@@ -2256,7 +2635,7 @@ impl Evaluator {
                     }
                     (PyObject::Dict(d), key) => {
                         let key_str = key.to_string();
-                        d.borrow()
+                        d.read()
                             .get(&key_str)
                             .cloned()
                             .ok_or_else(|| anyhow!("Key '{}' not found in dictionary", key_str))
@@ -2281,19 +2660,26 @@ impl Evaluator {
                     }
                     evaluated_items.insert(item);
                 }
-                Ok(PyObject::Set(Rc::new(RefCell::new(evaluated_items))))
+                Ok(PyObject::Set(Arc::new(RwLock::new(evaluated_items))))
             }
             Expr::Attribute(target, attr) => {
                 let val = self.eval_expression(target, env.clone())?;
+
+                // 1. Try get_method (handles built-in types like DateTime, Thread, List, Dict, Socket)
+                if let Some(m) = self.get_method(&val, attr) {
+                    return Ok(m);
+                }
+
+                // 2. Handle Instance, Class, Module specifically
                 match val {
                     PyObject::Instance {
                         ref class,
                         ref attributes,
                     } => {
-                        if let Some(attr_val) = attributes.borrow().get(attr) {
+                        if let Some(attr_val) = attributes.read().get(attr) {
                             return Ok(attr_val.clone());
                         }
-                        if let Some(method) = self.find_method(&class.borrow(), attr) {
+                        if let Some(method) = self.find_method(&class.read(), attr) {
                             return Ok(method);
                         }
                         Err(anyhow!("Attribute '{}' not found on instance", attr))
@@ -2305,205 +2691,16 @@ impl Evaluator {
                         Err(anyhow!("Attribute '{}' not found on class", attr))
                     }
                     PyObject::Module { ref name, ref env } => {
-                        if let Some(v) = env.borrow().get(attr) {
+                        if let Some(v) = env.read().get(attr) {
                             return Ok(v.clone());
                         }
                         Err(anyhow!("Module '{}' has no attribute '{}'", name, attr))
                     }
-                    PyObject::List(l) => match attr.as_str() {
-                        "append" | "push" => {
-                            let l_clone = l.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                if !args.is_empty() {
-                                    l_clone.borrow_mut().push(args[0].clone());
-                                }
-                                Ok(PyObject::None)
-                            })))
-                        }
-                        _ => Err(anyhow!("List object has no attribute '{}'", attr)),
-                    },
-                    PyObject::Dict(d) => match attr.as_str() {
-                        "get" => {
-                            let d_clone = d.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                if args.is_empty() {
-                                    return Ok(PyObject::None);
-                                }
-                                let key = args[0].to_string();
-                                let borrow = d_clone.borrow();
-                                if let Some(val) = borrow.get(&key) {
-                                    Ok(val.clone())
-                                } else if args.len() > 1 {
-                                    Ok(args[1].clone())
-                                } else {
-                                    Ok(PyObject::None)
-                                }
-                            })))
-                        }
-                        _ => Err(anyhow!("Dict object has no attribute '{}'", attr)),
-                    },
-                    PyObject::Socket(s) => match attr.as_str() {
-                        "bind" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                let addr_obj = args
-                                    .first()
-                                    .ok_or_else(|| anyhow!("TypeError: bind() takes 1 argument"))?;
-                                let addr = resolve_addr(addr_obj)?;
-                                s_clone
-                                    .borrow()
-                                    .inner
-                                    .bind(&addr.into())
-                                    .map_err(|e| anyhow!("OSError: {}", e))?;
-                                Ok(PyObject::None)
-                            })))
-                        }
-                        "listen" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                let backlog = args
-                                    .first()
-                                    .and_then(|a| a.as_int())
-                                    .cloned()
-                                    .unwrap_or(128);
-                                s_clone
-                                    .borrow()
-                                    .inner
-                                    .listen(backlog as i32)
-                                    .map_err(|e| anyhow!("OSError: {}", e))?;
-                                Ok(PyObject::None)
-                            })))
-                        }
-                        "accept" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, _args| {
-                                let (client, addr) = s_clone
-                                    .borrow()
-                                    .inner
-                                    .accept()
-                                    .map_err(|e| anyhow!("OSError: {}", e))?;
-                                let family = s_clone.borrow().family;
-                                let type_ = s_clone.borrow().type_;
-                                let py_client = PyObject::Socket(Rc::new(RefCell::new(PySocket {
-                                    inner: client,
-                                    family,
-                                    type_,
-                                })));
-                                let addr_tuple = match addr.as_socket() {
-                                    Some(addr) => PyObject::Tuple(vec![
-                                        PyObject::String(addr.ip().to_string()),
-                                        PyObject::Int(addr.port() as i64),
-                                    ]),
-                                    None => PyObject::None,
-                                };
-                                Ok(PyObject::Tuple(vec![py_client, addr_tuple]))
-                            })))
-                        }
-                        "connect" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                let addr_obj = args.first().ok_or_else(|| {
-                                    anyhow!("TypeError: connect() takes 1 argument")
-                                })?;
-                                let addr = resolve_addr(addr_obj)?;
-                                s_clone
-                                    .borrow()
-                                    .inner
-                                    .connect(&addr.into())
-                                    .map_err(|e| anyhow!("OSError: {}", e))?;
-                                Ok(PyObject::None)
-                            })))
-                        }
-                        "send" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                let data = args
-                                    .first()
-                                    .ok_or_else(|| anyhow!("TypeError: send() takes 1 argument"))?;
-                                let bytes = data.to_string().into_bytes();
-                                let sent = s_clone
-                                    .borrow()
-                                    .inner
-                                    .send(&bytes)
-                                    .map_err(|e| anyhow!("OSError: {}", e))?;
-                                Ok(PyObject::Int(sent as i64))
-                            })))
-                        }
-                        "recv" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                let bufsize = args
-                                    .first()
-                                    .and_then(|a| a.as_int())
-                                    .cloned()
-                                    .unwrap_or(4096);
-                                let mut buf = vec![0u8; bufsize as usize];
-                                // Prepare buffer for socket2 recv
-                                let n = unsafe {
-                                    let uninit_buf = std::slice::from_raw_parts_mut(
-                                        buf.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>,
-                                        buf.len(),
-                                    );
-                                    s_clone.borrow().inner.recv(uninit_buf)
-                                }
-                                .map_err(|e| anyhow!("OSError: {}", e))?;
-                                Ok(PyObject::String(
-                                    String::from_utf8_lossy(&buf[..n]).to_string(),
-                                ))
-                            })))
-                        }
-                        "close" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, _args| {
-                                // Socket2 close is dropping the object or shutdown
-                                // Standard Python close() shuts down and closes.
-                                // We'll just ignore for now as dropping often does it,
-                                // but we can call shutdown.
-                                let _ = s_clone.borrow().inner.shutdown(std::net::Shutdown::Both);
-                                Ok(PyObject::None)
-                            })))
-                        }
-                        "setsockopt" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                if args.len() < 3 {
-                                    return Err(anyhow!(
-                                        "TypeError: setsockopt() takes 3 arguments"
-                                    ));
-                                }
-                                let level = args[0].as_int().cloned().unwrap_or(0) as i32;
-                                let optname = args[1].as_int().cloned().unwrap_or(0) as i32;
-                                // In socket2 0.5, we can use set_sockopt for raw options
-                                // but often we need specific types. For simplicity, we'll try to use set_sockopt
-                                // if it exists, or just support SO_REUSEADDR specifically for now.
-                                if level == 1 && optname == 2 {
-                                    // SOL_SOCKET, SO_REUSEADDR
-                                    let val = args[2].as_int().cloned().unwrap_or(0) != 0;
-                                    s_clone
-                                        .borrow()
-                                        .inner
-                                        .set_reuse_address(val)
-                                        .map_err(|e| anyhow!("OSError: {}", e))?;
-                                }
-                                Ok(PyObject::None)
-                            })))
-                        }
-                        "setblocking" => {
-                            let s_clone = s.clone();
-                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
-                                let blocking =
-                                    args.first().map(|a| _ctx.is_truthy(a)).unwrap_or(true);
-                                s_clone
-                                    .borrow()
-                                    .inner
-                                    .set_nonblocking(!blocking)
-                                    .map_err(|e| anyhow!("OSError: {}", e))?;
-                                Ok(PyObject::None)
-                            })))
-                        }
-                        _ => Err(anyhow!("Socket object has no attribute '{}'", attr)),
-                    },
-                    _ => Err(anyhow!("Object has no attributes: {:?}", val)),
+                    _ => Err(anyhow!(
+                        "Attribute '{}' not found on type '{}'",
+                        attr,
+                        type_name(&val)
+                    )),
                 }
             }
             Expr::ListComprehension {
@@ -2516,33 +2713,52 @@ impl Evaluator {
                 let it_rc = iter_val
                     .to_iterator(self)
                     .ok_or_else(|| anyhow!("Object is not iterable"))?;
-                let mut it = it_rc.borrow_mut();
+                let mut it = it_rc.write();
 
                 let mut results = Vec::new();
                 while let Some(item) = it.next(self)? {
-                    let comp_env = Environment::with_parent(env.clone());
-                    let rc_comp_env = Rc::new(RefCell::new(comp_env));
-                    self.eval_assignment(target, item, rc_comp_env.clone())?;
+                    let comp_env = Arc::new(RwLock::new(Environment::with_parent(env.clone())));
+                    self.eval_assignment(target, item, comp_env.clone())?;
 
                     let mut should_add = true;
                     if let Some(cond) = condition {
-                        let cond_val = self.eval_expression(cond, rc_comp_env.clone())?;
-                        if !self.is_truthy(&cond_val) {
+                        let cond_val = self.eval_expression(cond, comp_env.clone())?;
+                        if !self.is_truthy_impl(&cond_val) {
                             should_add = false;
                         }
                     }
 
                     if should_add {
-                        results.push(self.eval_expression(expression, rc_comp_env)?);
+                        results.push(self.eval_expression(expression, comp_env)?);
                     }
                 }
-                Ok(PyObject::List(Rc::new(RefCell::new(results))))
+                Ok(PyObject::List(Arc::new(RwLock::new(results))))
             }
             Expr::Lambda { params, body } => Ok(PyObject::Function {
                 name: "<lambda>".to_string(),
                 params: params.clone(),
-                body: vec![Stmt::Return(Some(*body.clone()))],
+                body: vec![Stmt::Return(Some((**body).clone()))],
+                env: env.clone(),
+                is_generator: false,
+                is_async: false,
             }),
+            Expr::Await(expr) => {
+                let coro = self.eval_expression(expr, env.clone())?;
+                match coro {
+                    PyObject::Coroutine(state) => {
+                        let mut last_val = PyObject::None;
+                        while let Some(val) = self.resume_generator_impl(&state)? {
+                            last_val = val;
+                        }
+                        Ok(last_val)
+                    }
+                    PyObject::None => Ok(PyObject::None),
+                    _ => Err(anyhow!(
+                        "TypeError: object of type '{}' can't be used in 'await' expression",
+                        type_name(&coro)
+                    )),
+                }
+            }
             Expr::Slice { start, stop, step } => {
                 let s = start
                     .as_ref()
@@ -2588,7 +2804,7 @@ impl Evaluator {
         }
     }
 
-    fn eval_binary_op(
+    pub fn eval_binary_op_impl(
         &mut self,
         left: PyObject,
         op: &BinaryOp,
@@ -2627,13 +2843,13 @@ impl Evaluator {
         if let BinaryOp::In = op {
             return match right {
                 PyObject::List(l) => {
-                    let borrow = l.borrow();
-                    Ok(PyObject::Bool(borrow.contains(&left)))
+                    let lock = l.read();
+                    Ok(PyObject::Bool(lock.contains(&left)))
                 }
                 PyObject::Dict(d) => {
                     let key = left.to_string();
-                    let borrow = d.borrow();
-                    Ok(PyObject::Bool(borrow.contains_key(&key)))
+                    let lock = d.read();
+                    Ok(PyObject::Bool(lock.contains_key(&key)))
                 }
                 PyObject::String(s) => {
                     let sub = left.to_string();
@@ -2643,7 +2859,7 @@ impl Evaluator {
                     if !left.is_hashable() {
                         return Err(anyhow!("TypeError: unhashable type"));
                     }
-                    Ok(PyObject::Bool(s.borrow().contains(&left)))
+                    Ok(PyObject::Bool(s.read().contains(&left)))
                 }
                 _ => Err(anyhow!("Object of type {:?} is not iterable", right)),
             };
@@ -2747,28 +2963,28 @@ impl Evaluator {
                 _ => Err(anyhow!("Invalid operator for strings")),
             },
             (PyObject::Set(l), PyObject::Set(r)) => {
-                let s1 = l.borrow();
-                let s2 = r.borrow();
+                let s1 = l.read();
+                let s2 = r.read();
                 match op {
                     #[allow(clippy::mutable_key_type)]
                     BinaryOp::BitwiseOr => {
                         let res: HashSet<_> = s1.union(&s2).cloned().collect();
-                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                        Ok(PyObject::Set(Arc::new(RwLock::new(res))))
                     }
                     #[allow(clippy::mutable_key_type)]
                     BinaryOp::BitwiseAnd => {
                         let res: HashSet<_> = s1.intersection(&s2).cloned().collect();
-                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                        Ok(PyObject::Set(Arc::new(RwLock::new(res))))
                     }
                     #[allow(clippy::mutable_key_type)]
                     BinaryOp::Sub => {
                         let res: HashSet<_> = s1.difference(&s2).cloned().collect();
-                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                        Ok(PyObject::Set(Arc::new(RwLock::new(res))))
                     }
                     #[allow(clippy::mutable_key_type)]
                     BinaryOp::BitwiseXor => {
                         let res: HashSet<_> = s1.symmetric_difference(&s2).cloned().collect();
-                        Ok(PyObject::Set(Rc::new(RefCell::new(res))))
+                        Ok(PyObject::Set(Arc::new(RwLock::new(res))))
                     }
                     BinaryOp::Equal => Ok(PyObject::Bool(*s1 == *s2)),
                     BinaryOp::NotEqual => Ok(PyObject::Bool(*s1 != *s2)),
@@ -2784,16 +3000,16 @@ impl Evaluator {
         }
     }
 
-    fn is_truthy(&self, obj: &PyObject) -> bool {
+    pub fn is_truthy_impl(&self, obj: &PyObject) -> bool {
         match obj {
             PyObject::None => false,
             PyObject::Bool(b) => *b,
             PyObject::Int(n) => *n != 0,
             PyObject::Float(n) => *n != 0.0,
             PyObject::String(s) => !s.is_empty(),
-            PyObject::List(l) => !l.borrow().is_empty(),
-            PyObject::Dict(d) => !d.borrow().is_empty(),
-            PyObject::Set(s) => !s.borrow().is_empty(),
+            PyObject::List(l) => !l.read().is_empty(),
+            PyObject::Dict(d) => !d.read().is_empty(),
+            PyObject::Set(s) => !s.read().is_empty(),
             _ => true,
         }
     }
@@ -2814,13 +3030,13 @@ impl Evaluator {
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool {
+    pub fn is_subclass_impl(&self, child: &PyObject, parent: &PyObject) -> bool {
         if child == parent {
             return true;
         }
         if let PyObject::Class { bases, .. } = child {
             for base in bases {
-                if self.is_subclass(base, parent) {
+                if self.is_subclass_impl(base, parent) {
                     return true;
                 }
             }
@@ -2832,18 +3048,18 @@ impl Evaluator {
         &mut self,
         target: &Expr,
         value: PyObject,
-        env: Rc<RefCell<Environment>>,
+        env: Arc<RwLock<Environment>>,
     ) -> Result<()> {
         match target {
             Expr::Variable(name) => {
-                env.borrow_mut().define(name.clone(), value);
+                env.write().define(name.clone(), value);
                 Ok(())
             }
             Expr::Tuple(targets) | Expr::List(targets) => {
                 let it_rc = value
                     .to_iterator(self)
                     .ok_or_else(|| anyhow!("cannot unpack non-iterable object"))?;
-                let mut it = it_rc.borrow_mut();
+                let mut it = it_rc.write();
                 for target_expr in targets {
                     let val = it
                         .next(self)?
@@ -2863,7 +3079,7 @@ impl Evaluator {
                         let idx = index_val
                             .as_int()
                             .ok_or_else(|| anyhow!("List index must be an integer"))?;
-                        let mut items = l.borrow_mut();
+                        let mut items = l.write();
                         if (*idx as usize) < items.len() {
                             items[*idx as usize] = value;
                         } else {
@@ -2872,7 +3088,7 @@ impl Evaluator {
                     }
                     PyObject::Dict(d) => {
                         let key = index_val.to_string();
-                        d.borrow_mut().insert(key, value);
+                        d.write().insert(key, value);
                     }
                     _ => return Err(anyhow!("Object does not support item assignment")),
                 }
@@ -2881,7 +3097,7 @@ impl Evaluator {
             Expr::Attribute(target, attr) => {
                 let target_val = self.eval_expression(target, env.clone())?;
                 if let PyObject::Instance { attributes, .. } = target_val {
-                    attributes.borrow_mut().insert(attr.clone(), value);
+                    attributes.write().insert(attr.clone(), value);
                 } else {
                     return Err(anyhow!("Object has no attributes"));
                 }
@@ -2924,7 +3140,7 @@ fn py_to_json(obj: &PyObject) -> Result<JsonValue> {
         PyObject::None => Ok(JsonValue::Null),
         PyObject::List(l) => {
             let mut arr = Vec::new();
-            for item in l.borrow().iter() {
+            for item in l.read().iter() {
                 arr.push(py_to_json(item)?);
             }
             Ok(JsonValue::Array(arr))
@@ -2938,7 +3154,7 @@ fn py_to_json(obj: &PyObject) -> Result<JsonValue> {
         }
         PyObject::Dict(d) => {
             let mut map = serde_json::Map::new();
-            for (k, v) in d.borrow().iter() {
+            for (k, v) in d.read().iter() {
                 map.insert(k.clone(), py_to_json(v)?);
             }
             Ok(JsonValue::Object(map))
@@ -2966,14 +3182,14 @@ fn json_to_py(val: JsonValue) -> PyObject {
         JsonValue::String(s) => PyObject::String(s),
         JsonValue::Array(arr) => {
             let items: Vec<PyObject> = arr.into_iter().map(json_to_py).collect();
-            PyObject::List(Rc::new(RefCell::new(items)))
+            PyObject::List(Arc::new(RwLock::new(items)))
         }
         JsonValue::Object(obj) => {
             let mut map = HashMap::new();
             for (k, v) in obj {
                 map.insert(k, json_to_py(v));
             }
-            PyObject::Dict(Rc::new(RefCell::new(map)))
+            PyObject::Dict(Arc::new(RwLock::new(map)))
         }
     }
 }
@@ -2984,6 +3200,7 @@ fn type_name(obj: &PyObject) -> &'static str {
         PyObject::Float(_) => "float",
         PyObject::String(_) => "str",
         PyObject::Bool(_) => "bool",
+        PyObject::DateTime(_) => "datetime",
         PyObject::List(_) => "list",
         PyObject::Tuple(_) => "tuple",
         PyObject::Dict(_) => "dict",
@@ -2997,6 +3214,8 @@ fn type_name(obj: &PyObject) -> &'static str {
         PyObject::Instance { .. } => "instance",
         PyObject::Iterator(_) => "iterator",
         PyObject::Generator(_) => "generator",
+        PyObject::Coroutine(_) => "coroutine",
+        PyObject::Thread(_) => "thread",
         PyObject::Socket(_) => "socket",
         PyObject::None => "NoneType",
     }

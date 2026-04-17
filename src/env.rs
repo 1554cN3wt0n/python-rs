@@ -1,11 +1,11 @@
 use crate::object::PyObject;
-use std::cell::RefCell;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct Environment {
     values: HashMap<String, PyObject>,
-    parent: Option<Rc<RefCell<Environment>>>,
+    parent: Option<Arc<RwLock<Environment>>>,
 }
 
 impl Environment {
@@ -16,7 +16,7 @@ impl Environment {
         }
     }
 
-    pub fn with_parent(parent: Rc<RefCell<Environment>>) -> Self {
+    pub fn with_parent(parent: Arc<RwLock<Environment>>) -> Self {
         Self {
             values: HashMap::new(),
             parent: Some(parent),
@@ -33,7 +33,7 @@ impl Environment {
         }
 
         if let Some(parent) = &self.parent {
-            return parent.borrow().get(name);
+            return parent.read().get(name);
         }
 
         None
@@ -52,7 +52,7 @@ impl Environment {
         }
 
         if let Some(parent) = &self.parent {
-            return parent.borrow_mut().assign(name, value);
+            return parent.write().assign(name, value);
         }
 
         false
