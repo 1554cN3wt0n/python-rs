@@ -1,0 +1,30 @@
+import math
+
+print("--- Constants ---")
+print("math.pi =", math.pi)
+print("math.e =", math.e)
+
+print("\n--- Functions ---")
+print("math.sqrt(16) =", math.sqrt(16))
+print("math.sqrt(2) =", math.sqrt(2))
+
+print("\n--- Trigonometry ---")
+# 90 degrees in radians
+half_pi = math.pi / 2
+print("math.sin(pi/2) =", math.sin(half_pi))
+print("math.cos(pi/2) =", math.cos(half_pi)) # Should be close to 0
+print("math.tan(pi/4) =", math.tan(math.pi / 4))
+
+print("\n--- Logarithms and Exp ---")
+print("math.exp(1) =", math.exp(1))
+print("math.log(math.e) =", math.log(math.e))
+print("math.log(100, 10) =", math.log(100, 10))
+print("math.log10(1000) =", math.log10(1000))
+
+print("\n--- Rounding ---")
+print("math.floor(3.7) =", math.floor(3.7))
+print("math.ceil(3.2) =", math.ceil(3.2))
+
+print("\n--- GCD and Factorial ---")
+print("math.gcd(48, 18) =", math.gcd(48, 18))
+print("math.factorial(5) =", math.factorial(5))

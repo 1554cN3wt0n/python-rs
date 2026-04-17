@@ -16,6 +16,12 @@ pub trait PyCallableContext {
     fn call_func(&mut self, func: &PyObject, args: Vec<PyObject>) -> anyhow::Result<PyObject>;
     fn is_subclass(&self, child: &PyObject, parent: &PyObject) -> bool;
     fn is_truthy(&self, obj: &PyObject) -> bool;
+    fn eval_binary_op(
+        &mut self,
+        left: PyObject,
+        op: &crate::ast::BinaryOp,
+        right: PyObject,
+    ) -> anyhow::Result<PyObject>;
     fn resume_generator(
         &mut self,
         state: &Rc<RefCell<GeneratorState>>,
@@ -28,6 +34,7 @@ pub type BuiltinFunc =
 #[derive(Clone, EnumAsInner)]
 pub enum PyObject {
     Int(i64),
+    Float(f64),
     String(String),
     Bool(bool),
     List(Rc<RefCell<Vec<PyObject>>>),
@@ -223,6 +230,7 @@ impl fmt::Debug for PyObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PyObject::Int(n) => f.debug_tuple("Int").field(n).finish(),
+            PyObject::Float(n) => f.debug_tuple("Float").field(n).finish(),
             PyObject::String(s) => f.debug_tuple("String").field(s).finish(),
             PyObject::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
             PyObject::List(l) => f.debug_tuple("List").field(l).finish(),
@@ -258,6 +266,9 @@ impl PartialEq for PyObject {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (PyObject::Int(a), PyObject::Int(b)) => a == b,
+            (PyObject::Float(a), PyObject::Float(b)) => a == b,
+            (PyObject::Int(a), PyObject::Float(b)) => *a as f64 == *b,
+            (PyObject::Float(a), PyObject::Int(b)) => *a == *b as f64,
             (PyObject::String(a), PyObject::String(b)) => a == b,
             (PyObject::Bool(a), PyObject::Bool(b)) => a == b,
             (PyObject::List(a), PyObject::List(b)) => {
@@ -299,6 +310,17 @@ impl Hash for PyObject {
             PyObject::Int(n) => {
                 0u8.hash(state);
                 n.hash(state);
+            }
+            PyObject::Float(n) => {
+                0u8.hash(state); // Float and Int should hash same if equivalent
+                if n.is_finite() {
+                    let (mantissa, exponent, sign) = num_traits::Float::integer_decode(*n);
+                    mantissa.hash(state);
+                    exponent.hash(state);
+                    sign.hash(state);
+                } else {
+                    n.to_bits().hash(state);
+                }
             }
             PyObject::String(s) => {
                 1u8.hash(state);
@@ -346,6 +368,13 @@ impl fmt::Display for PyObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PyObject::Int(n) => write!(f, "{}", n),
+            PyObject::Float(n) => {
+                if n.fract() == 0.0 && n.abs() < 1e16 {
+                    write!(f, "{:.1}", n)
+                } else {
+                    write!(f, "{}", n)
+                }
+            }
             PyObject::String(s) => write!(f, "{}", s),
             PyObject::Bool(b) => write!(f, "{}", if *b { "True" } else { "False" }),
             PyObject::List(l) => {
@@ -472,6 +501,7 @@ impl PyObject {
     pub fn is_hashable(&self) -> bool {
         match self {
             PyObject::Int(_)
+            | PyObject::Float(_)
             | PyObject::String(_)
             | PyObject::Bool(_)
             | PyObject::None
@@ -482,6 +512,24 @@ impl PyObject {
             | PyObject::BuiltinFunction(_) => true,
             PyObject::Tuple(items) => items.iter().all(|item| item.is_hashable()),
             _ => false,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            PyObject::Float(f) => Some(*f),
+            PyObject::Int(i) => Some(*i as f64),
+            PyObject::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            PyObject::Int(i) => Some(*i),
+            PyObject::Bool(b) => Some(if *b { 1 } else { 0 }),
+            PyObject::Float(f) => Some(*f as i64),
+            _ => None,
         }
     }
 }

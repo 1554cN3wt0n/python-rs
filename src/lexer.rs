@@ -54,6 +54,9 @@ pub enum RawToken {
     #[regex("[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     Integer(i64),
 
+    #[regex(r"([0-9]*\.[0-9]+([eE][+-]?[0-9]+)?|[0-9]+\.[0-9]*([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)", |lex| lex.slice().parse::<f64>().unwrap())]
+    Float(f64),
+
     #[regex(r#""([^"\\]|\\.)*""#, |lex| {
         let s = lex.slice();
         s[1..s.len()-1].to_string()

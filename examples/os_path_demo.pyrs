@@ -1,0 +1,35 @@
+import os
+
+print("--- Current Directory ---")
+cwd = os.getcwd()
+print("cwd:", cwd)
+
+print("\n--- os.path Functions ---")
+test_file = "test_file.txt"
+print("os.path.exists(cwd) =", os.path.exists(cwd))
+print("os.path.isdir(cwd) =", os.path.isdir(cwd))
+print("os.path.isfile(cwd) =", os.path.isfile(cwd))
+
+print("\n--- join and split ---")
+path1 = "docs"
+path2 = "readme.txt"
+full_path = os.path.join(path1, path2)
+print("os.path.join(", path1, ",", path2, ") =", full_path)
+
+head, tail = os.path.split(full_path)
+print("os.path.split(", full_path, ") -> head:", head, "tail:", tail)
+
+print("\n--- Directory Operations ---")
+test_dir = "test_dir_delete_me"
+if os.path.exists(test_dir):
+    print("Found existing test dir, skipping mkdir")
+else:
+    print("Creating test dir...")
+    os.mkdir(test_dir)
+
+print("os.path.isdir(test_dir) =", os.path.isdir(test_dir))
+
+# Clean up
+# print("Removing test dir...")
+# os.remove(test_dir) # Wait, isdir is not remove_file. It was remove_file in my impl. 
+# os.remove in my impl uses std::fs::remove_file. I should be careful.

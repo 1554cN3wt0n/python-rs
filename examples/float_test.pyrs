@@ -1,0 +1,49 @@
+# Testing Float Support in PyRS
+
+print("--- Float Literals and Type ---")
+x = 3.14
+y = .5
+z = 10.
+print("x =", x, "type =", type(x))
+print("y =", y)
+print("z =", z)
+
+print("\n--- Basic Arithmetic (Float, Float) ---")
+print("x + y =", x + y)
+print("x - y =", x - y)
+print("x * y =", x * y)
+print("x / y =", x / y)
+print("x % y =", x % y)
+
+print("\n--- Coercion (Int, Float) ---")
+a = 10
+b = 2.5
+print("a + b =", a + b, "type =", type(a + b))
+print("a * b =", a * b)
+print("a / b =", a / b)
+print("b / a =", b / a)
+
+print("\n--- Division (Int, Int) -> Float ---")
+print("10 / 2 =", 10 / 2, "type =", type(10 / 2))
+print("3 / 2 =", 3 / 2)
+
+print("\n--- Comparisons ---")
+print("3.14 > 3 =", 3.14 > 3)
+print("3.14 == 3.14 =", 3.14 == 3.14)
+print("1.0 == 1 =", 1.0 == 1)
+
+print("\n--- Truthiness ---")
+if 0.0:
+    print("0.0 is True (Wrong!)")
+else:
+    print("0.0 is False (Correct)")
+
+if 0.0001:
+    print("0.0001 is True (Correct)")
+
+print("\n--- Aggregates ---")
+vals = [1, 2.5, 3, 0.5]
+print("vals =", vals)
+print("sum(vals) =", sum(vals))
+print("max(vals) =", max(vals))
+print("min(vals) =", min(vals))

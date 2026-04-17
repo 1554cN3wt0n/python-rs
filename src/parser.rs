@@ -531,6 +531,7 @@ impl Parser {
             Token::Raw(RawToken::False) => Ok(Expr::Literal(Literal::Bool(false))),
             Token::Raw(RawToken::None) => Ok(Expr::Literal(Literal::None)),
             Token::Raw(RawToken::Integer(n)) => Ok(Expr::Literal(Literal::Int(n))),
+            Token::Raw(RawToken::Float(n)) => Ok(Expr::Literal(Literal::Float(n))),
             Token::Raw(RawToken::String(s)) => Ok(Expr::Literal(Literal::String(s))),
             Token::Raw(RawToken::FString(s)) => self.parse_fstring(s),
             Token::Raw(RawToken::LBracket) => {

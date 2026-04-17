@@ -2,6 +2,7 @@ use crate::ast::{BinaryOp, Expr, Literal, LogicalOp, Stmt, UnaryOp};
 use crate::env::Environment;
 use crate::object::{ExecutionFrame, GeneratorState, PyObject};
 use anyhow::{Result, anyhow};
+use rand::RngExt;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -42,6 +43,15 @@ impl crate::object::PyCallableContext for Evaluator {
         state: &Rc<RefCell<GeneratorState>>,
     ) -> anyhow::Result<Option<PyObject>> {
         self.resume_generator(state)
+    }
+
+    fn eval_binary_op(
+        &mut self,
+        left: PyObject,
+        op: &crate::ast::BinaryOp,
+        right: PyObject,
+    ) -> anyhow::Result<PyObject> {
+        self.eval_binary_op(left, op, right)
     }
 }
 
@@ -108,16 +118,16 @@ impl Evaluator {
             "range".to_string(),
             PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
                 let (start, stop, step) = match args.len() {
-                    1 => (0, args[0].as_int().cloned().unwrap_or(0), 1),
+                    1 => (0, args[0].as_i64().unwrap_or(0), 1),
                     2 => (
                         args[0].as_int().cloned().unwrap_or(0),
                         args[1].as_int().cloned().unwrap_or(0),
                         1,
                     ),
                     3 => (
-                        args[0].as_int().cloned().unwrap_or(0),
-                        args[1].as_int().cloned().unwrap_or(0),
-                        args[2].as_int().cloned().unwrap_or(1),
+                        args[0].as_i64().unwrap_or(0),
+                        args[1].as_i64().unwrap_or(0),
+                        args[2].as_i64().unwrap_or(1),
                     ),
                     _ => (0, 0, 1),
                 };
@@ -148,6 +158,7 @@ impl Evaluator {
                 }
                 Ok(match &args[0] {
                     PyObject::Int(_) => PyObject::String("int".to_string()),
+                    PyObject::Float(_) => PyObject::String("float".to_string()),
                     PyObject::String(_) => PyObject::String("str".to_string()),
                     PyObject::Bool(_) => PyObject::String("bool".to_string()),
                     PyObject::List(_) => PyObject::String("list".to_string()),
@@ -179,6 +190,9 @@ impl Evaluator {
 
                     match (obj, target_type) {
                         (PyObject::Int(_), PyObject::Type(s)) if s == "int" => {
+                            return Ok(PyObject::Bool(true));
+                        }
+                        (PyObject::Float(_), PyObject::Type(s)) if s == "float" => {
                             return Ok(PyObject::Bool(true));
                         }
                         (PyObject::String(_), PyObject::Type(s)) if s == "str" => {
@@ -234,6 +248,9 @@ impl Evaluator {
         global_env
             .borrow_mut()
             .define("int".to_string(), PyObject::Type("int".to_string()));
+        global_env
+            .borrow_mut()
+            .define("float".to_string(), PyObject::Type("float".to_string()));
         global_env
             .borrow_mut()
             .define("str".to_string(), PyObject::Type("str".to_string()));
@@ -494,16 +511,14 @@ impl Evaluator {
                 if args.is_empty() {
                     return Ok(PyObject::Int(0));
                 }
-                let mut total = 0;
+                let mut total = PyObject::Int(0);
                 if let Some(it) = args[0].to_iterator(ctx) {
                     let mut it_borrow = it.borrow_mut();
                     while let Some(val) = it_borrow.next(ctx)? {
-                        if let PyObject::Int(n) = val {
-                            total += n;
-                        }
+                        total = ctx.eval_binary_op(total, &BinaryOp::Add, val)?;
                     }
                 }
-                Ok(PyObject::Int(total))
+                Ok(total)
             })),
         );
 
@@ -513,18 +528,26 @@ impl Evaluator {
                 if args.is_empty() {
                     return Ok(PyObject::None);
                 }
-                let mut max_val: Option<i64> = None;
+                let mut max_val: Option<PyObject> = None;
                 if let Some(it) = args[0].to_iterator(ctx) {
                     let mut it_borrow = it.borrow_mut();
                     while let Some(val) = it_borrow.next(ctx)? {
-                        if let PyObject::Int(n) = val
-                            && (max_val.is_none() || n > max_val.unwrap())
-                        {
-                            max_val = Some(n);
+                        match &max_val {
+                            None => max_val = Some(val),
+                            Some(current_max) => {
+                                let cmp = ctx.eval_binary_op(
+                                    val.clone(),
+                                    &BinaryOp::Greater,
+                                    current_max.clone(),
+                                )?;
+                                if ctx.is_truthy(&cmp) {
+                                    max_val = Some(val);
+                                }
+                            }
                         }
                     }
                 }
-                Ok(max_val.map(PyObject::Int).unwrap_or(PyObject::None))
+                Ok(max_val.unwrap_or(PyObject::None))
             })),
         );
 
@@ -534,150 +557,542 @@ impl Evaluator {
                 if args.is_empty() {
                     return Ok(PyObject::None);
                 }
-                let mut min_val: Option<i64> = None;
+                let mut min_val: Option<PyObject> = None;
                 if let Some(it) = args[0].to_iterator(ctx) {
                     let mut it_borrow = it.borrow_mut();
                     while let Some(val) = it_borrow.next(ctx)? {
-                        if let PyObject::Int(n) = val
-                            && (min_val.is_none() || n < min_val.unwrap())
-                        {
-                            min_val = Some(n);
+                        match &min_val {
+                            None => min_val = Some(val),
+                            Some(current_min) => {
+                                let cmp = ctx.eval_binary_op(
+                                    val.clone(),
+                                    &BinaryOp::Less,
+                                    current_min.clone(),
+                                )?;
+                                if ctx.is_truthy(&cmp) {
+                                    min_val = Some(val);
+                                }
+                            }
                         }
                     }
                 }
-                Ok(min_val.map(PyObject::Int).unwrap_or(PyObject::None))
+                Ok(min_val.unwrap_or(PyObject::None))
             })),
         );
     }
 
     fn init_builtin_modules(&mut self) {
-        // sys module
-        let mut sys_attrs = HashMap::new();
-        let args: Vec<PyObject> = std::env::args().map(PyObject::String).collect();
-        sys_attrs.insert(
-            "argv".to_string(),
-            PyObject::List(Rc::new(RefCell::new(args))),
+        // --- sys module ---
+        let sys_module = self.create_module(
+            "sys",
+            vec![
+                (
+                    "argv",
+                    PyObject::List(Rc::new(RefCell::new(
+                        std::env::args().map(PyObject::String).collect(),
+                    ))),
+                ),
+                (
+                    "path",
+                    PyObject::List(Rc::new(RefCell::new(
+                        self.load_paths
+                            .borrow()
+                            .iter()
+                            .map(|p| PyObject::String(p.clone()))
+                            .collect(),
+                    ))),
+                ),
+                ("version", PyObject::String("PyRS 0.1.0".to_string())),
+                (
+                    "exit",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let code = if let Some(arg) = args.first() {
+                            match arg {
+                                PyObject::Int(n) => *n as i32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        std::process::exit(code);
+                    })),
+                ),
+            ],
         );
-        let paths = self.load_paths.clone();
-        sys_attrs.insert(
-            "path".to_string(),
-            PyObject::List(Rc::new(RefCell::new(
-                paths
-                    .borrow()
-                    .iter()
-                    .map(|p| PyObject::String(p.clone()))
-                    .collect(),
-            ))),
-        );
-        sys_attrs.insert(
-            "version".to_string(),
-            PyObject::String("PyRS 0.1.0".to_string()),
-        );
-        sys_attrs.insert(
-            "exit".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
-                let code = if let Some(PyObject::Int(n)) = args.first() {
-                    *n as i32
-                } else {
-                    0
-                };
-                std::process::exit(code);
-            })),
-        );
-
-        let sys_module = PyObject::Module {
-            name: "sys".to_string(),
-            env: Rc::new(RefCell::new(Environment::new())),
-        };
-        if let PyObject::Module { env, .. } = &sys_module {
-            for (k, v) in sys_attrs {
-                env.borrow_mut().define(k, v);
-            }
-        }
         self.builtin_modules.insert("sys".to_string(), sys_module);
 
-        // os module
-        let mut os_attrs = HashMap::new();
-        os_attrs.insert(
-            "getcwd".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
-                let cwd = std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                Ok(PyObject::String(cwd))
-            })),
-        );
-        os_attrs.insert(
-            "listdir".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
-                let path = if let Some(PyObject::String(p)) = args.first() {
-                    p.clone()
-                } else {
-                    ".".to_string()
-                };
-                let mut entries = Vec::new();
-                if let Ok(read_dir) = std::fs::read_dir(path) {
-                    for entry in read_dir.flatten() {
-                        entries.push(PyObject::String(
-                            entry.file_name().to_string_lossy().to_string(),
+        // --- os module ---
+        let mut os_attrs = vec![
+            (
+                "getcwd",
+                PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                    Ok(PyObject::String(
+                        std::env::current_dir()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                    ))
+                })),
+            ),
+            (
+                "listdir",
+                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    let path = if let Some(PyObject::String(p)) = args.first() {
+                        p.clone()
+                    } else {
+                        ".".to_string()
+                    };
+                    let mut entries = Vec::new();
+                    if let Ok(read_dir) = std::fs::read_dir(path) {
+                        for entry in read_dir.flatten() {
+                            entries.push(PyObject::String(
+                                entry.file_name().to_string_lossy().to_string(),
+                            ));
+                        }
+                    }
+                    Ok(PyObject::List(Rc::new(RefCell::new(entries))))
+                })),
+            ),
+            (
+                "mkdir",
+                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    let path = args
+                        .first()
+                        .ok_or_else(|| {
+                            anyhow!("TypeError: mkdir() missing 1 required positional argument")
+                        })?
+                        .to_string();
+                    std::fs::create_dir(path)?;
+                    Ok(PyObject::None)
+                })),
+            ),
+            (
+                "remove",
+                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    let path = args
+                        .first()
+                        .ok_or_else(|| {
+                            anyhow!("TypeError: remove() missing 1 required positional argument")
+                        })?
+                        .to_string();
+                    std::fs::remove_file(path)?;
+                    Ok(PyObject::None)
+                })),
+            ),
+            (
+                "rename",
+                PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                    if args.len() < 2 {
+                        return Err(anyhow!(
+                            "TypeError: rename() missing 2 required positional arguments"
                         ));
                     }
-                }
-                Ok(PyObject::List(Rc::new(RefCell::new(entries))))
-            })),
-        );
+                    std::fs::rename(args[0].to_string(), args[1].to_string())?;
+                    Ok(PyObject::None)
+                })),
+            ),
+        ];
+
         let mut env_vars = HashMap::new();
         for (k, v) in std::env::vars() {
             env_vars.insert(k, PyObject::String(v));
         }
-        os_attrs.insert(
-            "environ".to_string(),
-            PyObject::Dict(Rc::new(RefCell::new(env_vars))),
-        );
+        os_attrs.push(("environ", PyObject::Dict(Rc::new(RefCell::new(env_vars)))));
 
-        let os_module = PyObject::Module {
-            name: "os".to_string(),
-            env: Rc::new(RefCell::new(Environment::new())),
-        };
-        if let PyObject::Module { env, .. } = &os_module {
-            for (k, v) in os_attrs {
-                env.borrow_mut().define(k, v);
-            }
-        }
+        // os.path submodule
+        let os_path = self.create_module(
+            "os.path",
+            vec![
+                (
+                    "exists",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let path = args.first().map(|a| a.to_string()).unwrap_or_default();
+                        Ok(PyObject::Bool(std::path::Path::new(&path).exists()))
+                    })),
+                ),
+                (
+                    "isdir",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let path = args.first().map(|a| a.to_string()).unwrap_or_default();
+                        Ok(PyObject::Bool(std::path::Path::new(&path).is_dir()))
+                    })),
+                ),
+                (
+                    "isfile",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let path = args.first().map(|a| a.to_string()).unwrap_or_default();
+                        Ok(PyObject::Bool(std::path::Path::new(&path).is_file()))
+                    })),
+                ),
+                (
+                    "join",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let mut path = std::path::PathBuf::new();
+                        for arg in args {
+                            path.push(arg.to_string());
+                        }
+                        Ok(PyObject::String(path.to_string_lossy().to_string()))
+                    })),
+                ),
+                (
+                    "split",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let path_str = args.first().map(|a| a.to_string()).unwrap_or_default();
+                        let path = std::path::Path::new(&path_str);
+                        let head = path
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let tail = path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        Ok(PyObject::Tuple(vec![
+                            PyObject::String(head),
+                            PyObject::String(tail),
+                        ]))
+                    })),
+                ),
+            ],
+        );
+        os_attrs.push(("path", os_path));
+
+        let os_module = self.create_module("os", os_attrs);
         self.builtin_modules.insert("os".to_string(), os_module);
 
-        // time module
-        let mut time_attrs = HashMap::new();
-        time_attrs.insert(
-            "time".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                Ok(PyObject::Int(now as i64))
-            })),
+        // --- math module ---
+        let math_module = self.create_module(
+            "math",
+            vec![
+                ("pi", PyObject::Float(std::f64::consts::PI)),
+                ("e", PyObject::Float(std::f64::consts::E)),
+                (
+                    "sqrt",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: sqrt() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.sqrt()))
+                    })),
+                ),
+                (
+                    "sin",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: sin() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.sin()))
+                    })),
+                ),
+                (
+                    "cos",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: cos() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.cos()))
+                    })),
+                ),
+                (
+                    "tan",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: tan() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.tan()))
+                    })),
+                ),
+                (
+                    "asin",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: asin() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.asin()))
+                    })),
+                ),
+                (
+                    "acos",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: acos() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.acos()))
+                    })),
+                ),
+                (
+                    "atan",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: atan() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.atan()))
+                    })),
+                ),
+                (
+                    "exp",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: exp() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.exp()))
+                    })),
+                ),
+                (
+                    "log",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: log() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        if args.len() > 1 {
+                            let base = args[1]
+                                .as_f64()
+                                .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                            Ok(PyObject::Float(n.log(base)))
+                        } else {
+                            Ok(PyObject::Float(n.ln()))
+                        }
+                    })),
+                ),
+                (
+                    "log10",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: log10() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Float(n.log10()))
+                    })),
+                ),
+                (
+                    "floor",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: floor() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Int(n.floor() as i64))
+                    })),
+                ),
+                (
+                    "ceil",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: ceil() missing 1 required positional argument")
+                            })?
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        Ok(PyObject::Int(n.ceil() as i64))
+                    })),
+                ),
+                (
+                    "gcd",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        if args.len() < 2 {
+                            return Err(anyhow!(
+                                "TypeError: gcd() missing 2 required positional arguments"
+                            ));
+                        }
+                        let mut a = args[0]
+                            .as_i64()
+                            .ok_or_else(|| anyhow!("TypeError: an integer is required"))?
+                            .abs();
+                        let mut b = args[1]
+                            .as_i64()
+                            .ok_or_else(|| anyhow!("TypeError: an integer is required"))?
+                            .abs();
+                        while b != 0 {
+                            a %= b;
+                            std::mem::swap(&mut a, &mut b);
+                        }
+                        Ok(PyObject::Int(a))
+                    })),
+                ),
+                (
+                    "factorial",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let n = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "TypeError: factorial() missing 1 required positional argument"
+                                )
+                            })?
+                            .as_i64()
+                            .ok_or_else(|| anyhow!("TypeError: an integer is required"))?;
+                        if n < 0 {
+                            return Err(anyhow!(
+                                "ValueError: factorial() not defined for negative values"
+                            ));
+                        }
+                        let mut res: i64 = 1;
+                        for i in 1..=n {
+                            res = res.checked_mul(i).ok_or_else(|| {
+                                anyhow!("OverflowError: factorial result too large")
+                            })?;
+                        }
+                        Ok(PyObject::Int(res))
+                    })),
+                ),
+            ],
         );
-        time_attrs.insert(
-            "sleep".to_string(),
-            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
-                if let Some(PyObject::Int(n)) = args.first() {
-                    std::thread::sleep(std::time::Duration::from_secs(*n as u64));
-                }
-                Ok(PyObject::None)
-            })),
-        );
+        self.builtin_modules.insert("math".to_string(), math_module);
 
-        let time_module = PyObject::Module {
-            name: "time".to_string(),
-            env: Rc::new(RefCell::new(Environment::new())),
-        };
-        if let PyObject::Module { env, .. } = &time_module {
-            for (k, v) in time_attrs {
-                env.borrow_mut().define(k, v);
-            }
-        }
+        // --- random module ---
+        let random_module = self.create_module(
+            "random",
+            vec![
+                (
+                    "random",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                        let mut rng = rand::rng();
+                        Ok(PyObject::Float(rng.random::<f64>()))
+                    })),
+                ),
+                (
+                    "uniform",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        if args.len() < 2 {
+                            return Err(anyhow!(
+                                "TypeError: uniform() missing 2 required positional arguments"
+                            ));
+                        }
+                        let a = args[0]
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        let b = args[1]
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("TypeError: a float is required"))?;
+                        let mut rng = rand::rng();
+                        Ok(PyObject::Float(rng.random_range(a..=b)))
+                    })),
+                ),
+                (
+                    "randint",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        if args.len() < 2 {
+                            return Err(anyhow!(
+                                "TypeError: randint() missing 2 required positional arguments"
+                            ));
+                        }
+                        let a = args[0]
+                            .as_i64()
+                            .ok_or_else(|| anyhow!("TypeError: an integer is required"))?;
+                        let b = args[1]
+                            .as_i64()
+                            .ok_or_else(|| anyhow!("TypeError: an integer is required"))?;
+                        let mut rng = rand::rng();
+                        Ok(PyObject::Int(rng.random_range(a..=b)))
+                    })),
+                ),
+                (
+                    "choice",
+                    PyObject::BuiltinFunction(Rc::new(|ctx, args| {
+                        let seq = args.first().ok_or_else(|| {
+                            anyhow!("TypeError: choice() missing 1 required positional argument")
+                        })?;
+                        if let Some(it) = seq.to_iterator(ctx) {
+                            let mut items = Vec::new();
+                            let mut it_borrow = it.borrow_mut();
+                            while let Some(val) = it_borrow.next(ctx)? {
+                                items.push(val);
+                            }
+                            if items.is_empty() {
+                                return Err(anyhow!(
+                                    "IndexError: Cannot choose from an empty sequence"
+                                ));
+                            }
+                            let mut rng = rand::rng();
+                            let idx = rng.random_range(0..items.len());
+                            Ok(items[idx].clone())
+                        } else {
+                            Err(anyhow!("TypeError: object is not iterable"))
+                        }
+                    })),
+                ),
+            ],
+        );
+        self.builtin_modules
+            .insert("random".to_string(), random_module);
+
+        // --- time module ---
+        let time_module = self.create_module(
+            "time",
+            vec![
+                (
+                    "time",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        Ok(PyObject::Float(now.as_secs_f64()))
+                    })),
+                ),
+                (
+                    "sleep",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let secs = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
+                        std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+                        Ok(PyObject::None)
+                    })),
+                ),
+            ],
+        );
         self.builtin_modules.insert("time".to_string(), time_module);
+    }
+
+    fn create_module(&self, name: &str, attrs: Vec<(&str, PyObject)>) -> PyObject {
+        let env = Rc::new(RefCell::new(Environment::new()));
+        for (k, v) in attrs {
+            env.borrow_mut().define(k.to_string(), v);
+        }
+        PyObject::Module {
+            name: name.to_string(),
+            env,
+        }
     }
 
     pub fn resume_generator(
@@ -1200,6 +1615,7 @@ impl Evaluator {
         match expr {
             Expr::Literal(lit) => match lit {
                 Literal::Int(n) => Ok(PyObject::Int(*n)),
+                Literal::Float(f) => Ok(PyObject::Float(*f)),
                 Literal::String(s) => Ok(PyObject::String(s.clone())),
                 Literal::Bool(b) => Ok(PyObject::Bool(*b)),
                 Literal::None => Ok(PyObject::None),
@@ -1827,7 +2243,7 @@ impl Evaluator {
                     if r == 0 {
                         return Err(anyhow!("ZeroDivisionError: division by zero"));
                     }
-                    Ok(PyObject::Int(l / r))
+                    Ok(PyObject::Float(l as f64 / r as f64))
                 }
                 BinaryOp::Mod => {
                     if r == 0 {
@@ -1846,6 +2262,69 @@ impl Evaluator {
                 BinaryOp::BitwiseXor => Ok(PyObject::Int(l ^ r)),
                 BinaryOp::In => unreachable!(),
             },
+            (PyObject::Float(l), PyObject::Float(r)) => match op {
+                BinaryOp::Add => Ok(PyObject::Float(l + r)),
+                BinaryOp::Sub => Ok(PyObject::Float(l - r)),
+                BinaryOp::Mul => Ok(PyObject::Float(l * r)),
+                BinaryOp::Div => {
+                    if r == 0.0 {
+                        return Err(anyhow!("ZeroDivisionError: float division by zero"));
+                    }
+                    Ok(PyObject::Float(l / r))
+                }
+                BinaryOp::Mod => Ok(PyObject::Float(l % r)),
+                BinaryOp::Equal => Ok(PyObject::Bool(l == r)),
+                BinaryOp::NotEqual => Ok(PyObject::Bool(l != r)),
+                BinaryOp::Less => Ok(PyObject::Bool(l < r)),
+                BinaryOp::Greater => Ok(PyObject::Bool(l > r)),
+                BinaryOp::LessEqual => Ok(PyObject::Bool(l <= r)),
+                BinaryOp::GreaterEqual => Ok(PyObject::Bool(l >= r)),
+                _ => Err(anyhow!("TypeError: unsupported operand type(s) for float")),
+            },
+            (PyObject::Int(l), PyObject::Float(r)) => {
+                let l_f = l as f64;
+                match op {
+                    BinaryOp::Add => Ok(PyObject::Float(l_f + r)),
+                    BinaryOp::Sub => Ok(PyObject::Float(l_f - r)),
+                    BinaryOp::Mul => Ok(PyObject::Float(l_f * r)),
+                    BinaryOp::Div => {
+                        if r == 0.0 {
+                            return Err(anyhow!("ZeroDivisionError: division by zero"));
+                        }
+                        Ok(PyObject::Float(l_f / r))
+                    }
+                    BinaryOp::Mod => Ok(PyObject::Float(l_f % r)),
+                    BinaryOp::Equal => Ok(PyObject::Bool(l_f == r)),
+                    BinaryOp::NotEqual => Ok(PyObject::Bool(l_f != r)),
+                    BinaryOp::Less => Ok(PyObject::Bool(l_f < r)),
+                    BinaryOp::Greater => Ok(PyObject::Bool(l_f > r)),
+                    BinaryOp::LessEqual => Ok(PyObject::Bool(l_f <= r)),
+                    BinaryOp::GreaterEqual => Ok(PyObject::Bool(l_f >= r)),
+                    _ => Err(anyhow!("TypeError: unsupported operand type(s)")),
+                }
+            }
+            (PyObject::Float(l), PyObject::Int(r)) => {
+                let r_f = r as f64;
+                match op {
+                    BinaryOp::Add => Ok(PyObject::Float(l + r_f)),
+                    BinaryOp::Sub => Ok(PyObject::Float(l - r_f)),
+                    BinaryOp::Mul => Ok(PyObject::Float(l * r_f)),
+                    BinaryOp::Div => {
+                        if r == 0 {
+                            return Err(anyhow!("ZeroDivisionError: division by zero"));
+                        }
+                        Ok(PyObject::Float(l / r_f))
+                    }
+                    BinaryOp::Mod => Ok(PyObject::Float(l % r_f)),
+                    BinaryOp::Equal => Ok(PyObject::Bool(l == r_f)),
+                    BinaryOp::NotEqual => Ok(PyObject::Bool(l != r_f)),
+                    BinaryOp::Less => Ok(PyObject::Bool(l < r_f)),
+                    BinaryOp::Greater => Ok(PyObject::Bool(l > r_f)),
+                    BinaryOp::LessEqual => Ok(PyObject::Bool(l <= r_f)),
+                    BinaryOp::GreaterEqual => Ok(PyObject::Bool(l >= r_f)),
+                    _ => Err(anyhow!("TypeError: unsupported operand type(s)")),
+                }
+            }
             (PyObject::String(l), PyObject::String(r)) => match op {
                 BinaryOp::Add => Ok(PyObject::String(format!("{}{}", l, r))),
                 BinaryOp::Equal => Ok(PyObject::Bool(l == r)),
@@ -1896,6 +2375,7 @@ impl Evaluator {
             PyObject::None => false,
             PyObject::Bool(b) => *b,
             PyObject::Int(n) => *n != 0,
+            PyObject::Float(n) => *n != 0.0,
             PyObject::String(s) => !s.is_empty(),
             PyObject::List(l) => !l.borrow().is_empty(),
             PyObject::Dict(d) => !d.borrow().is_empty(),

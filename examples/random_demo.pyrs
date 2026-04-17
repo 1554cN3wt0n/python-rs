@@ -1,0 +1,36 @@
+import random
+
+print("--- Basic Random ---")
+print("random.random() =", random.random())
+print("random.random() =", random.random())
+
+print("\n--- Uniform ---")
+print("random.uniform(1, 10) =", random.uniform(1, 10))
+print("random.uniform(1.5, 2.5) =", random.uniform(1.5, 2.5))
+
+print("\n--- Randint ---")
+print("random.randint(1, 100) =", random.randint(1, 100))
+print("random.randint(100, 200) =", random.randint(100, 200))
+
+print("\n--- Choice ---")
+items = ["apple", "banana", "cherry", "date"]
+print("items =", items)
+print("random.choice(items) =", random.choice(items))
+print("random.choice(items) =", random.choice(items))
+
+print("\n--- Testing Randomness ---")
+# Count results of 100 randint(1, 2)
+count1 = 0
+count2 = 0
+i = 0
+while i < 100:
+    r = random.randint(1, 2)
+    if r == 1:
+        count1 = count1 + 1
+    else:
+        count2 = count2 + 1
+    i = i + 1
+
+print("In 100 trials of randint(1, 2):")
+print("  1s:", count1)
+print("  2s:", count2)
