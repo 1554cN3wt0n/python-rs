@@ -1,0 +1,16 @@
+import os
+
+print("--- OS Module Demo ---")
+cwd = os.getcwd()
+print("Current Working Directory:", cwd)
+
+print("Listing contents of current directory:")
+entries = os.listdir(".")
+for entry in entries:
+    print("  [FILE/DIR]", entry)
+
+user = os.environ.get("USER", "Guest")
+print("Hello,", user + "!")
+
+home = os.environ.get("HOME", "not set")
+print("Home Directory:", home)

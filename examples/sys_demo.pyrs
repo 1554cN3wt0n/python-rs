@@ -1,0 +1,15 @@
+import sys
+
+print("--- System Module Demo ---")
+print("Python Version Identifier:", sys.version)
+print("Command Line Arguments:", sys.argv)
+print("Load Paths (sys.path):")
+for path in sys.path:
+    print("  -", path)
+
+if len(sys.argv) > 1:
+    print("First argument received:", sys.argv[1])
+
+print("Exiting with status 0...")
+sys.exit(0)
+print("This line will never be printed.")

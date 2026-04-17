@@ -9,6 +9,7 @@ use std::rc::Rc;
 pub struct Evaluator {
     pub global_env: Rc<RefCell<Environment>>,
     load_paths: Rc<RefCell<Vec<String>>>,
+    builtin_modules: HashMap<String, PyObject>,
 }
 
 impl crate::object::PyCallableContext for Evaluator {
@@ -48,7 +49,19 @@ impl Evaluator {
     pub fn new() -> Self {
         let global_env = Rc::new(RefCell::new(Environment::new()));
         let load_paths = Rc::new(RefCell::new(vec![".".to_string()]));
+        let mut evaluator = Self {
+            global_env,
+            load_paths,
+            builtin_modules: HashMap::new(),
+        };
 
+        evaluator.init_builtin_modules();
+        evaluator.init_builtins();
+        evaluator
+    }
+
+    fn init_builtins(&mut self) {
+        let global_env = self.global_env.clone();
         // Register built-ins
         global_env.borrow_mut().define(
             "print".to_string(),
@@ -431,7 +444,7 @@ impl Evaluator {
         );
 
         // File I/O
-        let open_load_paths = load_paths.clone();
+        let open_load_paths = self.load_paths.clone();
         global_env.borrow_mut().define(
             "open".to_string(),
             PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
@@ -535,11 +548,136 @@ impl Evaluator {
                 Ok(min_val.map(PyObject::Int).unwrap_or(PyObject::None))
             })),
         );
+    }
 
-        Self {
-            global_env,
-            load_paths,
+    fn init_builtin_modules(&mut self) {
+        // sys module
+        let mut sys_attrs = HashMap::new();
+        let args: Vec<PyObject> = std::env::args().map(PyObject::String).collect();
+        sys_attrs.insert(
+            "argv".to_string(),
+            PyObject::List(Rc::new(RefCell::new(args))),
+        );
+        let paths = self.load_paths.clone();
+        sys_attrs.insert(
+            "path".to_string(),
+            PyObject::List(Rc::new(RefCell::new(
+                paths
+                    .borrow()
+                    .iter()
+                    .map(|p| PyObject::String(p.clone()))
+                    .collect(),
+            ))),
+        );
+        sys_attrs.insert(
+            "version".to_string(),
+            PyObject::String("PyRS 0.1.0".to_string()),
+        );
+        sys_attrs.insert(
+            "exit".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                let code = if let Some(PyObject::Int(n)) = args.first() {
+                    *n as i32
+                } else {
+                    0
+                };
+                std::process::exit(code);
+            })),
+        );
+
+        let sys_module = PyObject::Module {
+            name: "sys".to_string(),
+            env: Rc::new(RefCell::new(Environment::new())),
+        };
+        if let PyObject::Module { env, .. } = &sys_module {
+            for (k, v) in sys_attrs {
+                env.borrow_mut().define(k, v);
+            }
         }
+        self.builtin_modules.insert("sys".to_string(), sys_module);
+
+        // os module
+        let mut os_attrs = HashMap::new();
+        os_attrs.insert(
+            "getcwd".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                Ok(PyObject::String(cwd))
+            })),
+        );
+        os_attrs.insert(
+            "listdir".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                let path = if let Some(PyObject::String(p)) = args.first() {
+                    p.clone()
+                } else {
+                    ".".to_string()
+                };
+                let mut entries = Vec::new();
+                if let Ok(read_dir) = std::fs::read_dir(path) {
+                    for entry in read_dir.flatten() {
+                        entries.push(PyObject::String(
+                            entry.file_name().to_string_lossy().to_string(),
+                        ));
+                    }
+                }
+                Ok(PyObject::List(Rc::new(RefCell::new(entries))))
+            })),
+        );
+        let mut env_vars = HashMap::new();
+        for (k, v) in std::env::vars() {
+            env_vars.insert(k, PyObject::String(v));
+        }
+        os_attrs.insert(
+            "environ".to_string(),
+            PyObject::Dict(Rc::new(RefCell::new(env_vars))),
+        );
+
+        let os_module = PyObject::Module {
+            name: "os".to_string(),
+            env: Rc::new(RefCell::new(Environment::new())),
+        };
+        if let PyObject::Module { env, .. } = &os_module {
+            for (k, v) in os_attrs {
+                env.borrow_mut().define(k, v);
+            }
+        }
+        self.builtin_modules.insert("os".to_string(), os_module);
+
+        // time module
+        let mut time_attrs = HashMap::new();
+        time_attrs.insert(
+            "time".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                Ok(PyObject::Int(now as i64))
+            })),
+        );
+        time_attrs.insert(
+            "sleep".to_string(),
+            PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                if let Some(PyObject::Int(n)) = args.first() {
+                    std::thread::sleep(std::time::Duration::from_secs(*n as u64));
+                }
+                Ok(PyObject::None)
+            })),
+        );
+
+        let time_module = PyObject::Module {
+            name: "time".to_string(),
+            env: Rc::new(RefCell::new(Environment::new())),
+        };
+        if let PyObject::Module { env, .. } = &time_module {
+            for (k, v) in time_attrs {
+                env.borrow_mut().define(k, v);
+            }
+        }
+        self.builtin_modules.insert("time".to_string(), time_module);
     }
 
     pub fn resume_generator(
@@ -950,6 +1088,11 @@ impl Evaluator {
                         content = Some(c);
                         break;
                     }
+                }
+
+                if let Some(builtin) = self.builtin_modules.get(name) {
+                    env.borrow_mut().define(name.clone(), builtin.clone());
+                    return Ok(None);
                 }
 
                 let content =

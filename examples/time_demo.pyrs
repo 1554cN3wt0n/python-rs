@@ -1,0 +1,20 @@
+import time
+
+print("--- Time Module Demo ---")
+start_time = time.time()
+print("Process started at epoch:", start_time)
+
+duration = 2
+print("Sleeping for", duration, "seconds...")
+time.sleep(duration)
+
+end_time = time.time()
+print("Process resumed at epoch:", end_time)
+
+elapsed = end_time - start_time
+print("Total elapsed time (approx):", elapsed, "seconds")
+
+if elapsed >= duration:
+    print("Success: Timer worked as expected.")
+else:
+    print("Warning: Timer might be inaccurate.")
