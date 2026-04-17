@@ -1,5 +1,6 @@
 use crate::ast::Stmt;
 use enum_as_inner::EnumAsInner;
+use socket2::Socket;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -68,7 +69,15 @@ pub enum PyObject {
     },
     Iterator(Rc<RefCell<PyIterator>>),
     Generator(Rc<RefCell<GeneratorState>>),
+    Socket(Rc<RefCell<PySocket>>),
     None,
+}
+
+#[derive(Debug)]
+pub struct PySocket {
+    pub inner: Socket,
+    pub family: i32,
+    pub type_: i32,
 }
 
 #[derive(Clone)]
@@ -257,6 +266,7 @@ impl fmt::Debug for PyObject {
                 .finish(),
             PyObject::Instance { .. } => f.debug_struct("Instance").finish_non_exhaustive(),
             PyObject::Generator(state) => f.debug_tuple("Generator").field(state).finish(),
+            PyObject::Socket(s) => f.debug_tuple("Socket").field(s).finish(),
             PyObject::None => write!(f, "None"),
         }
     }
@@ -297,6 +307,7 @@ impl PartialEq for PyObject {
             ) => a_start == b_start && a_stop == b_stop && a_step == b_step,
             (PyObject::Iterator(a), PyObject::Iterator(b)) => Rc::ptr_eq(a, b),
             (PyObject::None, PyObject::None) => true,
+            (PyObject::Socket(a), PyObject::Socket(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -453,6 +464,7 @@ impl fmt::Display for PyObject {
                 }
                 write!(f, ")")
             }
+            PyObject::Socket(_) => write!(f, "<socket object>"),
             PyObject::Instance { class, .. } => {
                 let class_borrow = class.borrow();
                 if let PyObject::Class { name, .. } = &*class_borrow {

@@ -1,0 +1,33 @@
+import socket
+
+print("--- 1. socket.gethostname() ---")
+try:
+    hostname = socket.gethostname()
+    print("Hostname:", hostname)
+except OSError as e:
+    print("Error getting hostname:", e)
+
+print("\n--- 2. Connecting to google.com:80 ---")
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+print("Socket created.")
+
+try:
+    print("Connecting...")
+    s.connect(("google.com", 80))
+    print("Connected.")
+
+    print("Sending HTTP request...")
+    request = "GET / HTTP/1.1\r\nHost: google.com\r\nConnection: close\r\n\r\n"
+    s.send(request)
+
+    print("Receiving response...")
+    response = s.recv(1024)
+    print("Response length:", len(response))
+    print("First 100 characters of response:")
+    # Simple slicing manually if needed, but print handles strings
+    print(response)
+    s.close()
+
+except OSError as e:
+    print("Network error:", e)
+    s.close()

@@ -1,12 +1,14 @@
 use crate::ast::{BinaryOp, Expr, Literal, LogicalOp, Stmt, UnaryOp};
 use crate::env::Environment;
-use crate::object::{ExecutionFrame, GeneratorState, PyObject};
+use crate::object::{ExecutionFrame, GeneratorState, PyObject, PySocket};
 use anyhow::{Result, anyhow};
 use rand::RngExt;
 use regex::Regex;
 use serde_json::Value as JsonValue;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::rc::Rc;
 
 pub struct Evaluator {
@@ -178,6 +180,7 @@ impl Evaluator {
                     PyObject::Generator(_) => PyObject::String("generator".to_string()),
                     PyObject::Tuple(_) => PyObject::String("tuple".to_string()),
                     PyObject::Set(_) => PyObject::String("set".to_string()),
+                    PyObject::Socket(_) => PyObject::String("socket".to_string()),
                     PyObject::None => PyObject::String("NoneType".to_string()),
                 })
             })),
@@ -285,6 +288,9 @@ impl Evaluator {
             "KeyError".to_string(),
             PyObject::Type("KeyError".to_string()),
         );
+        global_env
+            .borrow_mut()
+            .define("OSError".to_string(), PyObject::Type("OSError".to_string()));
         global_env.borrow_mut().define(
             "set".to_string(),
             PyObject::BuiltinFunction(Rc::new(|ctx, args| {
@@ -1239,6 +1245,96 @@ impl Evaluator {
             ],
         );
         self.builtin_modules.insert("re".to_string(), re_module);
+
+        // --- socket module ---
+        let socket_module = self.create_module(
+            "socket",
+            vec![
+                ("AF_INET", PyObject::Int(2)),
+                ("SOCK_STREAM", PyObject::Int(1)),
+                ("SOCK_DGRAM", PyObject::Int(2)),
+                ("SOL_SOCKET", PyObject::Int(1)),
+                ("SO_REUSEADDR", PyObject::Int(2)),
+                ("error", PyObject::Type("OSError".to_string())),
+                (
+                    "socket",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let family = args.get(0).and_then(|a| a.as_int()).cloned().unwrap_or(2);
+                        let type_ = args.get(1).and_then(|a| a.as_int()).cloned().unwrap_or(1);
+                        let proto = args.get(2).and_then(|a| a.as_int()).cloned().unwrap_or(0);
+
+                        let domain = Domain::from(family as i32);
+                        let rtype = Type::from(type_ as i32);
+                        let protocol = Some(Protocol::from(proto as i32));
+
+                        let socket = Socket::new(domain, rtype, protocol)
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+
+                        Ok(PyObject::Socket(Rc::new(RefCell::new(PySocket {
+                            inner: socket,
+                            family: family as i32,
+                            type_: type_ as i32,
+                        }))))
+                    })),
+                ),
+                (
+                    "gethostname",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, _args| {
+                        let name = hostname::get().map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::String(name.to_string_lossy().into_owned()))
+                    })),
+                ),
+                (
+                    "gethostbyname",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let name = args
+                            .first()
+                            .ok_or_else(|| anyhow!("TypeError: gethostbyname() takes 1 argument"))?
+                            .to_string();
+                        let addr_str = format!("{}:0", name);
+                        let mut addrs = addr_str
+                            .to_socket_addrs()
+                            .map_err(|e| anyhow!("OSError: {}", e))?;
+                        if let Some(addr) = addrs.next() {
+                            Ok(PyObject::String(addr.ip().to_string()))
+                        } else {
+                            Err(anyhow!("OSError: host not found"))
+                        }
+                    })),
+                ),
+                (
+                    "inet_aton",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let ip = args
+                            .first()
+                            .ok_or_else(|| anyhow!("TypeError: inet_aton() takes 1 argument"))?
+                            .to_string();
+                        let addr: std::net::Ipv4Addr =
+                            ip.parse().map_err(|e| anyhow!("OSError: {}", e))?;
+                        Ok(PyObject::String(
+                            String::from_utf8_lossy(&addr.octets()).to_string(),
+                        ))
+                    })),
+                ),
+                (
+                    "inet_ntoa",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let data = args
+                            .first()
+                            .ok_or_else(|| anyhow!("TypeError: inet_ntoa() takes 1 argument"))?
+                            .to_string();
+                        let bytes = data.as_bytes();
+                        if bytes.len() != 4 {
+                            return Err(anyhow!("OSError: packed IP wrong length"));
+                        }
+                        let addr = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+                        Ok(PyObject::String(addr.to_string()))
+                    })),
+                ),
+            ],
+        );
+        self.builtin_modules
+            .insert("socket".to_string(), socket_module);
     }
 
     fn create_module(&self, name: &str, attrs: Vec<(&str, PyObject)>) -> PyObject {
@@ -2246,6 +2342,167 @@ impl Evaluator {
                         }
                         _ => Err(anyhow!("Dict object has no attribute '{}'", attr)),
                     },
+                    PyObject::Socket(s) => match attr.as_str() {
+                        "bind" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+                                let addr_obj = args
+                                    .first()
+                                    .ok_or_else(|| anyhow!("TypeError: bind() takes 1 argument"))?;
+                                let addr = resolve_addr(addr_obj)?;
+                                s_clone
+                                    .borrow()
+                                    .inner
+                                    .bind(&addr.into())
+                                    .map_err(|e| anyhow!("OSError: {}", e))?;
+                                Ok(PyObject::None)
+                            })))
+                        }
+                        "listen" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+                                let backlog = args
+                                    .first()
+                                    .and_then(|a| a.as_int())
+                                    .cloned()
+                                    .unwrap_or(128);
+                                s_clone
+                                    .borrow()
+                                    .inner
+                                    .listen(backlog as i32)
+                                    .map_err(|e| anyhow!("OSError: {}", e))?;
+                                Ok(PyObject::None)
+                            })))
+                        }
+                        "accept" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, _args| {
+                                let (client, addr) = s_clone
+                                    .borrow()
+                                    .inner
+                                    .accept()
+                                    .map_err(|e| anyhow!("OSError: {}", e))?;
+                                let family = s_clone.borrow().family;
+                                let type_ = s_clone.borrow().type_;
+                                let py_client = PyObject::Socket(Rc::new(RefCell::new(PySocket {
+                                    inner: client,
+                                    family,
+                                    type_,
+                                })));
+                                let addr_tuple = match addr.as_socket() {
+                                    Some(addr) => PyObject::Tuple(vec![
+                                        PyObject::String(addr.ip().to_string()),
+                                        PyObject::Int(addr.port() as i64),
+                                    ]),
+                                    None => PyObject::None,
+                                };
+                                Ok(PyObject::Tuple(vec![py_client, addr_tuple]))
+                            })))
+                        }
+                        "connect" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+                                let addr_obj = args.first().ok_or_else(|| {
+                                    anyhow!("TypeError: connect() takes 1 argument")
+                                })?;
+                                let addr = resolve_addr(addr_obj)?;
+                                s_clone
+                                    .borrow()
+                                    .inner
+                                    .connect(&addr.into())
+                                    .map_err(|e| anyhow!("OSError: {}", e))?;
+                                Ok(PyObject::None)
+                            })))
+                        }
+                        "send" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+                                let data = args
+                                    .first()
+                                    .ok_or_else(|| anyhow!("TypeError: send() takes 1 argument"))?;
+                                let bytes = data.to_string().into_bytes();
+                                let sent = s_clone
+                                    .borrow()
+                                    .inner
+                                    .send(&bytes)
+                                    .map_err(|e| anyhow!("OSError: {}", e))?;
+                                Ok(PyObject::Int(sent as i64))
+                            })))
+                        }
+                        "recv" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+                                let bufsize = args
+                                    .first()
+                                    .and_then(|a| a.as_int())
+                                    .cloned()
+                                    .unwrap_or(4096);
+                                let mut buf = vec![0u8; bufsize as usize];
+                                // Prepare buffer for socket2 recv
+                                let n = unsafe {
+                                    let uninit_buf = std::slice::from_raw_parts_mut(
+                                        buf.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>,
+                                        buf.len(),
+                                    );
+                                    s_clone.borrow().inner.recv(uninit_buf)
+                                }
+                                .map_err(|e| anyhow!("OSError: {}", e))?;
+                                Ok(PyObject::String(
+                                    String::from_utf8_lossy(&buf[..n]).to_string(),
+                                ))
+                            })))
+                        }
+                        "close" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, _args| {
+                                // Socket2 close is dropping the object or shutdown
+                                // Standard Python close() shuts down and closes.
+                                // We'll just ignore for now as dropping often does it,
+                                // but we can call shutdown.
+                                let _ = s_clone.borrow().inner.shutdown(std::net::Shutdown::Both);
+                                Ok(PyObject::None)
+                            })))
+                        }
+                        "setsockopt" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+                                if args.len() < 3 {
+                                    return Err(anyhow!(
+                                        "TypeError: setsockopt() takes 3 arguments"
+                                    ));
+                                }
+                                let level = args[0].as_int().cloned().unwrap_or(0) as i32;
+                                let optname = args[1].as_int().cloned().unwrap_or(0) as i32;
+                                // In socket2 0.5, we can use set_sockopt for raw options
+                                // but often we need specific types. For simplicity, we'll try to use set_sockopt
+                                // if it exists, or just support SO_REUSEADDR specifically for now.
+                                if level == 1 && optname == 2 {
+                                    // SOL_SOCKET, SO_REUSEADDR
+                                    let val = args[2].as_int().cloned().unwrap_or(0) != 0;
+                                    s_clone
+                                        .borrow()
+                                        .inner
+                                        .set_reuse_address(val)
+                                        .map_err(|e| anyhow!("OSError: {}", e))?;
+                                }
+                                Ok(PyObject::None)
+                            })))
+                        }
+                        "setblocking" => {
+                            let s_clone = s.clone();
+                            Ok(PyObject::BuiltinFunction(Rc::new(move |_ctx, args| {
+                                let blocking =
+                                    args.first().map(|a| _ctx.is_truthy(a)).unwrap_or(true);
+                                s_clone
+                                    .borrow()
+                                    .inner
+                                    .set_nonblocking(!blocking)
+                                    .map_err(|e| anyhow!("OSError: {}", e))?;
+                                Ok(PyObject::None)
+                            })))
+                        }
+                        _ => Err(anyhow!("Socket object has no attribute '{}'", attr)),
+                    },
                     _ => Err(anyhow!("Object has no attributes: {:?}", val)),
                 }
             }
@@ -2635,6 +2892,25 @@ impl Evaluator {
     }
 }
 
+fn resolve_addr(addr: &PyObject) -> Result<SocketAddr> {
+    if let PyObject::Tuple(items) = addr {
+        if items.len() >= 2 {
+            let host = items[0].to_string();
+            let port = items[1]
+                .as_int()
+                .ok_or_else(|| anyhow!("TypeError: Port must be an integer"))?;
+            let addr_str = format!("{}:{}", host, port);
+            let mut addrs = addr_str
+                .to_socket_addrs()
+                .map_err(|e| anyhow!("OSError: {}", e))?;
+            return addrs
+                .next()
+                .ok_or_else(|| anyhow!("OSError: Could not resolve address"));
+        }
+    }
+    Err(anyhow!("TypeError: address must be a tuple (host, port)"))
+}
+
 fn py_to_json(obj: &PyObject) -> Result<JsonValue> {
     match obj {
         PyObject::Int(n) => Ok(JsonValue::Number((*n).into())),
@@ -2721,6 +2997,7 @@ fn type_name(obj: &PyObject) -> &'static str {
         PyObject::Instance { .. } => "instance",
         PyObject::Iterator(_) => "iterator",
         PyObject::Generator(_) => "generator",
+        PyObject::Socket(_) => "socket",
         PyObject::None => "NoneType",
     }
 }

@@ -1,0 +1,38 @@
+import socket
+
+print("--- Local Loopback Test ---")
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0)) # Bind to a random free port
+server.listen(1)
+
+# In our implementation, bind doesn't return the bound address yet in PySocket, 
+# but we can try to get it if we implemented getsockname.
+# For now, let's just use a fixed port if 0 is tricky.
+server.close()
+
+port = 9999
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    server.bind(("127.0.0.1", port))
+    server.listen(1)
+    print("Server listening on port", port)
+    server.setblocking(False)
+
+    print("Checking for connections (non-blocking)...")
+    try:
+        server.accept()
+    except OSError:
+        print("No immediate connection, as expected.")
+
+    # Since we can't easily run two things at once,
+    # let's just test that connect() works to a known open port or itself
+    # but that would block.
+    
+    print("Socket tests passed basic setup.")
+
+except OSError as e:
+    print("Socket error:", e)
+
+server.close()
