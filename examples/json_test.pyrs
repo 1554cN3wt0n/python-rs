@@ -1,0 +1,37 @@
+import json
+
+print("--- 1. Primitives ---")
+data = {"int": 42, "float": 3.14, "string": "hello", "bool": True, "none": None}
+s = json.dumps(data)
+print("JSON string:", s)
+
+loaded = json.loads(s)
+print("Loaded int:", loaded["int"])
+print("Loaded float:", loaded["float"])
+print("Loaded string:", loaded["string"])
+print("Loaded bool:", loaded["bool"])
+print("Loaded none:", loaded["none"])
+
+print("\n--- 2. Nested Structures ---")
+nested = {"list": [1, 2, {"key": "val"}], "tuple": (4, 5)}
+s_nested = json.dumps(nested)
+print("Nested JSON:", s_nested)
+
+loaded_nested = json.loads(s_nested)
+print("Loaded list[2]['key']:", loaded_nested["list"][2]["key"])
+print("Loaded tuple (is list):", loaded_nested["tuple"])
+
+print("\n--- 3. Error Handling ---")
+try:
+    json.loads("{invalid json}")
+except ValueError as e:
+    print("Caught expected error:", e)
+
+# Test unserializable object
+def my_func():
+    pass
+
+try:
+    json.dumps(my_func)
+except TypeError as e:
+    print("Caught expected error:", e)

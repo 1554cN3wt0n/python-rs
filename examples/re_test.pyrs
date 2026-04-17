@@ -1,0 +1,36 @@
+import re
+
+print("--- 1. re.search ---")
+text = "The quick brown fox jumps over the lazy dog"
+m = re.search("fox", text)
+if m:
+    print("Found 'fox' in groups:", m["groups"][0])
+
+m_groups = re.search("(quick) (brown)", text)
+if m_groups:
+    print("Group 1:", m_groups["groups"][1])
+    print("Group 2:", m_groups["groups"][2])
+
+print("\n--- 2. re.match ---")
+# match looks at the beginning
+m_start = re.match("The", text)
+print("Match 'The' at start:", m_start != None)
+
+m_middle = re.match("quick", text)
+print("Match 'quick' at start (should be False):", m_middle != None)
+
+print("\n--- 3. re.findall ---")
+emails = "Contact me at alice@example.com or bob@example.org"
+found = re.findall("[a-z0-9._%+-]+@[a-z0-9.-]+.[a-z]{2,}", emails)
+print("Found emails:", found)
+
+print("\n--- 4. re.sub ---")
+secret = "My phone number is 555-1234"
+masked = re.sub("[0-9]", "*", secret)
+print("Masked:", masked)
+
+print("\n--- 5. Error Handling ---")
+try:
+    re.search("[invalid pattern", "text")
+except ValueError as e:
+    print("Caught expected error:", e)

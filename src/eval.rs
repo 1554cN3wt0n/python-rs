@@ -3,6 +3,8 @@ use crate::env::Environment;
 use crate::object::{ExecutionFrame, GeneratorState, PyObject};
 use anyhow::{Result, anyhow};
 use rand::RngExt;
+use regex::Regex;
+use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -266,6 +268,22 @@ impl Evaluator {
         global_env.borrow_mut().define(
             "Exception".to_string(),
             PyObject::Type("Exception".to_string()),
+        );
+        global_env.borrow_mut().define(
+            "ValueError".to_string(),
+            PyObject::Type("ValueError".to_string()),
+        );
+        global_env.borrow_mut().define(
+            "TypeError".to_string(),
+            PyObject::Type("TypeError".to_string()),
+        );
+        global_env.borrow_mut().define(
+            "IndexError".to_string(),
+            PyObject::Type("IndexError".to_string()),
+        );
+        global_env.borrow_mut().define(
+            "KeyError".to_string(),
+            PyObject::Type("KeyError".to_string()),
         );
         global_env.borrow_mut().define(
             "set".to_string(),
@@ -1082,6 +1100,145 @@ impl Evaluator {
             ],
         );
         self.builtin_modules.insert("time".to_string(), time_module);
+
+        // --- json module ---
+        let json_module = self.create_module(
+            "json",
+            vec![
+                (
+                    "loads",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let s = args
+                            .first()
+                            .ok_or_else(|| {
+                                anyhow!("TypeError: loads() missing 1 required positional argument")
+                            })?
+                            .to_string();
+                        let val: JsonValue =
+                            serde_json::from_str(&s).map_err(|e| anyhow!("ValueError: {}", e))?;
+                        Ok(json_to_py(val))
+                    })),
+                ),
+                (
+                    "dumps",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        let obj = args.first().ok_or_else(|| {
+                            anyhow!("TypeError: dumps() missing 1 required positional argument")
+                        })?;
+                        let val = py_to_json(obj)?;
+                        let s = serde_json::to_string(&val)
+                            .map_err(|e| anyhow!("ValueError: {}", e))?;
+                        Ok(PyObject::String(s))
+                    })),
+                ),
+            ],
+        );
+        self.builtin_modules.insert("json".to_string(), json_module);
+
+        // --- re module ---
+        let re_module = self.create_module(
+            "re",
+            vec![
+                (
+                    "search",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        if args.len() < 2 {
+                            return Err(anyhow!(
+                                "TypeError: search() missing 2 required positional arguments"
+                            ));
+                        }
+                        let pattern = args[0].to_string();
+                        let text = args[1].to_string();
+                        let re = Regex::new(&pattern).map_err(|e| anyhow!("ValueError: {}", e))?;
+                        if let Some(caps) = re.captures(&text) {
+                            let mut res = HashMap::new();
+                            let mut groups = Vec::new();
+                            for i in 0..caps.len() {
+                                groups.push(PyObject::String(
+                                    caps.get(i)
+                                        .map(|m| m.as_str().to_string())
+                                        .unwrap_or_default(),
+                                ));
+                            }
+                            res.insert(
+                                "groups".to_string(),
+                                PyObject::List(Rc::new(RefCell::new(groups))),
+                            );
+                            Ok(PyObject::Dict(Rc::new(RefCell::new(res))))
+                        } else {
+                            Ok(PyObject::None)
+                        }
+                    })),
+                ),
+                (
+                    "match",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        if args.len() < 2 {
+                            return Err(anyhow!(
+                                "TypeError: match() missing 2 required positional arguments"
+                            ));
+                        }
+                        let pattern = args[0].to_string();
+                        let text = args[1].to_string();
+                        let re = Regex::new(&format!("^{}", pattern))
+                            .map_err(|e| anyhow!("ValueError: {}", e))?;
+                        if let Some(caps) = re.captures(&text) {
+                            let mut res = HashMap::new();
+                            let mut groups = Vec::new();
+                            for i in 0..caps.len() {
+                                groups.push(PyObject::String(
+                                    caps.get(i)
+                                        .map(|m| m.as_str().to_string())
+                                        .unwrap_or_default(),
+                                ));
+                            }
+                            res.insert(
+                                "groups".to_string(),
+                                PyObject::List(Rc::new(RefCell::new(groups))),
+                            );
+                            Ok(PyObject::Dict(Rc::new(RefCell::new(res))))
+                        } else {
+                            Ok(PyObject::None)
+                        }
+                    })),
+                ),
+                (
+                    "findall",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        if args.len() < 2 {
+                            return Err(anyhow!(
+                                "TypeError: findall() missing 2 required positional arguments"
+                            ));
+                        }
+                        let pattern = args[0].to_string();
+                        let text = args[1].to_string();
+                        let re = Regex::new(&pattern).map_err(|e| anyhow!("ValueError: {}", e))?;
+                        let matches: Vec<PyObject> = re
+                            .find_iter(&text)
+                            .map(|m| PyObject::String(m.as_str().to_string()))
+                            .collect();
+                        Ok(PyObject::List(Rc::new(RefCell::new(matches))))
+                    })),
+                ),
+                (
+                    "sub",
+                    PyObject::BuiltinFunction(Rc::new(|_ctx, args| {
+                        if args.len() < 3 {
+                            return Err(anyhow!(
+                                "TypeError: sub() missing 3 required positional arguments"
+                            ));
+                        }
+                        let pattern = args[0].to_string();
+                        let repl = args[1].to_string();
+                        let text = args[2].to_string();
+                        let re = Regex::new(&pattern).map_err(|e| anyhow!("ValueError: {}", e))?;
+                        let res = re.replace_all(&text, repl.as_str()).to_string();
+                        Ok(PyObject::String(res))
+                    })),
+                ),
+            ],
+        );
+        self.builtin_modules.insert("re".to_string(), re_module);
     }
 
     fn create_module(&self, name: &str, attrs: Vec<(&str, PyObject)>) -> PyObject {
@@ -2475,5 +2632,95 @@ impl Evaluator {
             }
             _ => Err(anyhow!("Invalid assignment target")),
         }
+    }
+}
+
+fn py_to_json(obj: &PyObject) -> Result<JsonValue> {
+    match obj {
+        PyObject::Int(n) => Ok(JsonValue::Number((*n).into())),
+        PyObject::Float(f) => {
+            let n = serde_json::Number::from_f64(*f)
+                .ok_or_else(|| anyhow!("ValueError: Invalid float for JSON"))?;
+            Ok(JsonValue::Number(n))
+        }
+        PyObject::String(s) => Ok(JsonValue::String(s.clone())),
+        PyObject::Bool(b) => Ok(JsonValue::Bool(*b)),
+        PyObject::None => Ok(JsonValue::Null),
+        PyObject::List(l) => {
+            let mut arr = Vec::new();
+            for item in l.borrow().iter() {
+                arr.push(py_to_json(item)?);
+            }
+            Ok(JsonValue::Array(arr))
+        }
+        PyObject::Tuple(t) => {
+            let mut arr = Vec::new();
+            for item in t.iter() {
+                arr.push(py_to_json(item)?);
+            }
+            Ok(JsonValue::Array(arr))
+        }
+        PyObject::Dict(d) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in d.borrow().iter() {
+                map.insert(k.clone(), py_to_json(v)?);
+            }
+            Ok(JsonValue::Object(map))
+        }
+        _ => Err(anyhow!(
+            "TypeError: Object of type {} is not JSON serializable",
+            type_name(obj)
+        )),
+    }
+}
+
+fn json_to_py(val: JsonValue) -> PyObject {
+    match val {
+        JsonValue::Null => PyObject::None,
+        JsonValue::Bool(b) => PyObject::Bool(b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                PyObject::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                PyObject::Float(f)
+            } else {
+                PyObject::None
+            }
+        }
+        JsonValue::String(s) => PyObject::String(s),
+        JsonValue::Array(arr) => {
+            let items: Vec<PyObject> = arr.into_iter().map(json_to_py).collect();
+            PyObject::List(Rc::new(RefCell::new(items)))
+        }
+        JsonValue::Object(obj) => {
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                map.insert(k, json_to_py(v));
+            }
+            PyObject::Dict(Rc::new(RefCell::new(map)))
+        }
+    }
+}
+
+fn type_name(obj: &PyObject) -> &'static str {
+    match obj {
+        PyObject::Int(_) => "int",
+        PyObject::Float(_) => "float",
+        PyObject::String(_) => "str",
+        PyObject::Bool(_) => "bool",
+        PyObject::List(_) => "list",
+        PyObject::Tuple(_) => "tuple",
+        PyObject::Dict(_) => "dict",
+        PyObject::Set(_) => "set",
+        PyObject::Function { .. } => "function",
+        PyObject::BuiltinFunction(_) => "builtin_function",
+        PyObject::Class { .. } => "type",
+        PyObject::Type(_) => "type",
+        PyObject::Module { .. } => "module",
+        PyObject::Slice { .. } => "slice",
+        PyObject::Instance { .. } => "instance",
+        PyObject::Iterator(_) => "iterator",
+        PyObject::Generator(_) => "generator",
+        PyObject::None => "NoneType",
     }
 }
